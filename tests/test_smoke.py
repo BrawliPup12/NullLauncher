@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.10.2"
+    assert APP_VERSION == "1.10.3"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -68,3 +68,27 @@ def test_versions_screen_builds_version_rows_without_name_error():
 
     assert launcher.menu.items is not None
     assert any(getattr(item, "hint", None) == "release" for item in launcher.menu.items)
+
+
+def test_launch_flow_has_no_hardcoded_cyrillic_ui_text():
+    import inspect
+    import re
+    from null_launcher.app import NullLauncher
+
+    source = inspect.getsource(NullLauncher.play) + inspect.getsource(NullLauncher._ensure_legacy_java)
+    assert re.search(r"[А-Яа-яЁё]", source) is None
+
+
+def test_launch_text_exists_for_every_language():
+    from null_launcher.config import I18N, LANGUAGES
+
+    keys = {
+        "install_java_runtime", "no_account_title", "no_account_body",
+        "no_version_title", "no_version_body", "version_missing_title",
+        "version_missing_body", "verify_version", "empty_launch_command",
+        "minecraft_running", "player_label", "proxy_label", "log_label",
+        "launcher_returns", "game_failed_title", "exit_code",
+        "last_log_lines", "empty_log", "launch_error_title", "see_launcher_log",
+    }
+    for language in LANGUAGES:
+        assert keys <= I18N[language].keys()

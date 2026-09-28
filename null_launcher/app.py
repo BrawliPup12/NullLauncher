@@ -965,7 +965,7 @@ class NullLauncher:
             if runtime_name not in available:
                 return ""
             self.progress_task(
-                "Установка Java runtime",
+                tr("install_java_runtime"),
                 lambda cb: self.mll.runtime.install_jvm_runtime(runtime_name, str(self.store.minecraft_dir), callback=cb),
             )
             path = self.mll.runtime.get_executable_path(runtime_name, str(self.store.minecraft_dir))
@@ -978,29 +978,29 @@ class NullLauncher:
         account = self.store.account()
         version_id = self.store.data.get("selected_version")
         if not account:
-            self.message("Нет аккаунта", "Создайте offline-аккаунт в разделе «Аккаунты».", error=True)
+            self.message(tr("no_account_title"), tr("no_account_body"), error=True)
             return
         if not version_id:
-            self.message("Версия не выбрана", "Установите или выберите версию в разделе «Версии».", error=True)
+            self.message(tr("no_version_title"), tr("no_version_body"), error=True)
             return
         version_json = self.store.minecraft_dir / "versions" / version_id / f"{version_id}.json"
         if not version_json.exists():
             self.store.data["selected_version"] = None
             self.store.save()
-            self.message("Версия не найдена", f"Файлы {version_id} отсутствуют. Выберите версию заново.", error=True)
+            self.message(tr("version_missing_title"), tr("version_missing_body", version=version_id), error=True)
             return
 
         try:
             if self.store.settings["repair_before_launch"]:
                 self.progress_task(
-                    f"Проверка {version_id}",
+                    tr("verify_version", version=version_id),
                     lambda cb: self.mll.install.install_minecraft_version(version_id, str(self.store.minecraft_dir), callback=cb),
                 )
             auto_java = self._ensure_legacy_java(version_id)
             options = self._build_launch_options(account, version_id, auto_java)
             command = self.mll.command.get_minecraft_command(version_id, str(self.store.minecraft_dir), options)
             if not command:
-                raise RuntimeError("minecraft-launcher-lib вернул пустую команду запуска")
+                raise RuntimeError(tr("empty_launch_command"))
                                                                                    
             command.extend(proxy_game_arguments(self.store.proxy_profile()))
             log_path = self.store.base / "game-latest.log"
@@ -1023,7 +1023,7 @@ class NullLauncher:
                 self.running = False
                 return
             active_proxy = self.store.proxy_profile()
-            proxy_line = f"Прокси: {active_proxy['name']} · {proxy_label(active_proxy)}" if active_proxy else "Прокси: нет"
+            proxy_line = f"{tr('proxy_label')}: {active_proxy['name']} · {proxy_label(active_proxy)}" if active_proxy else f"{tr('proxy_label')}: {tr('none')}"
             self.term._view_key = f"game-running:{version_id}"
             first_game_frame = True
             while process.poll() is None:
@@ -1031,11 +1031,11 @@ class NullLauncher:
                 w, h = max(20, int(size.columns)), max(8, int(size.lines))
                 content_w = max(16, min(140, w - 4))
                 content: list[str] = brand_logo_lines(w, h) + [""]
-                content.extend(f"{BOLD}{line}{RESET}" for line in wrap_plain(f"Minecraft {version_id} запущен", content_w, max_lines=2))
-                for text in (f"Игрок: {account['name']}", proxy_line, f"PID {process.pid} · лог: {log_path}"):
+                content.extend(f"{BOLD}{line}{RESET}" for line in wrap_plain(tr("minecraft_running", version=version_id), content_w, max_lines=2))
+                for text in (f"{tr('player_label')}: {account['name']}", proxy_line, f"PID {process.pid} · {tr('log_label')}: {log_path}"):
                     content.extend(wrap_plain(text, content_w, max_lines=2))
                 if h >= 14:
-                    content.extend(["", "Лаунчер вернётся в меню после закрытия игры."])
+                    content.extend(["", tr("launcher_returns")])
                 frame = [""] * h
                 start = max(0, (h - len(content)) // 2)
                 for i, line in enumerate(content):
@@ -1048,7 +1048,7 @@ class NullLauncher:
             log_file.close()
             if code != 0:
                 tail = tail_text(log_path, 16)
-                self.message("Minecraft завершился с ошибкой", f"Код выхода: {code}\n\nПоследние строки лога:\n{tail or 'лог пуст'}", error=True)
+                self.message(tr("game_failed_title"), f"{tr('exit_code')}: {code}\n\n{tr('last_log_lines')}:\n{tail or tr('empty_log')}", error=True)
         except Exception as exc:
             self.log.exception("Launch failed")
-            self.message("Ошибка запуска", f"{type(exc).__name__}: {exc}\n\nСм. null_launcher.log.", error=True)
+            self.message(tr("launch_error_title"), f"{type(exc).__name__}: {exc}\n\n{tr('see_launcher_log')}", error=True)
