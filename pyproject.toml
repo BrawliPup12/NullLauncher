@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nulllauncher"
+version = "1.10.1"
+description = "Terminal Minecraft launcher for Windows"
+requires-python = ">=3.10"
+dependencies = [
+  "minecraft-launcher-lib==8.0",
+  "Pillow>=10.0,<13",
+]
+
+[project.scripts]
+nulllauncher = "null_launcher.cli:main"
+
+[tool.setuptools]
+packages = ["null_launcher"]
