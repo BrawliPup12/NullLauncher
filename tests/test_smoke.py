@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.10.4"
+    assert APP_VERSION == "1.10.5"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -125,3 +125,26 @@ def test_news_filter_label_exists_for_every_language():
 
     for language in LANGUAGES:
         assert I18N[language].get("news_filter_color")
+
+
+def test_windows_update_helper_replaces_restarts_and_cleans_up(tmp_path):
+    from null_launcher.updater import _build_windows_replacer_script
+
+    source = tmp_path / "staged.exe"
+    target = tmp_path / "NullLauncher.exe"
+    log = tmp_path / "update.log"
+    script = _build_windows_replacer_script(source, target, 1234, "ab" * 32, log)
+
+    assert "Wait-Process -Id $pidToWait" in script
+    assert "[System.IO.File]::Replace" in script
+    assert "Start-Process -FilePath $target" in script
+    assert "Remove-Item -LiteralPath $src" in script
+    assert "Remove-Item -LiteralPath $PSCommandPath" in script
+
+
+def test_update_staging_directory_is_separate_and_overridable(tmp_path, monkeypatch):
+    from null_launcher.updater import _update_root
+
+    staging = tmp_path / "private-updates"
+    monkeypatch.setenv("NULLLAUNCHER_UPDATE_DIR", str(staging))
+    assert _update_root() == staging.resolve()

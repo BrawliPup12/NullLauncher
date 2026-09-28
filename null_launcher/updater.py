@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import ctypes
 import dataclasses
 import hashlib
 import json
@@ -14,6 +15,7 @@ import time
 from typing import Any, Optional
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+import uuid
 
 from .config import (
     APP_NAME,
@@ -37,13 +39,6 @@ class UpdateInfo:
 
 
 def running_artifact_path() -> Path:
-    """Path that can be atomically replaced by the updater.
-
-    Release builds are PyInstaller one-file executables, so sys.executable is the
-    launcher itself. Development/source mode is intentionally not auto-updated:
-    a multi-module Git checkout should be updated with Git instead of replacing
-    one Python file.
-    """
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve()
     return (Path(__file__).resolve().parents[1] / "NullLauncher.py").resolve()
@@ -60,7 +55,7 @@ def _version_tuple(value: Any) -> tuple[int, int, int, int]:
     core = _release_version(value).split("+", 1)[0].split("-", 1)[0]
     nums = [int(x) for x in re.findall(r"\d+", core)[:4]]
     nums.extend([0] * (4 - len(nums)))
-    return tuple(nums[:4])                              
+    return tuple(nums[:4])
 
 
 def _is_newer_version(candidate: Any, current: Any = APP_VERSION) -> bool:
@@ -75,15 +70,58 @@ def _github_headers(*, binary: bool = False) -> dict[str, str]:
     }
 
 
-def check_github_update(timeout: float = 4.5) -> Optional[UpdateInfo]:
-    """Return a newer Windows EXE release for packaged builds.
+def _update_root() -> Path:
+    override = os.environ.get("NULLLAUNCHER_UPDATE_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
+        return Path(base) / APP_NAME / "updates"
+    return Path(tempfile.gettempdir()) / APP_NAME / "updates"
 
-    Source checkouts are not self-modified because NullLauncher is now a proper
-    multi-file project. Developers update with Git; release users receive the EXE.
-    """
+
+def _mark_hidden(path: Path) -> None:
+    if os.name != "nt":
+        return
+    with contextlib.suppress(Exception):
+        get_attrs = ctypes.windll.kernel32.GetFileAttributesW
+        set_attrs = ctypes.windll.kernel32.SetFileAttributesW
+        get_attrs.argtypes = [ctypes.c_wchar_p]
+        get_attrs.restype = ctypes.c_uint32
+        set_attrs.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32]
+        set_attrs.restype = ctypes.c_int
+        current = int(get_attrs(str(path)))
+        if current != 0xFFFFFFFF:
+            set_attrs(str(path), current | 0x2)
+
+
+def _prepare_update_root() -> Path:
+    root = _update_root()
+    root.mkdir(parents=True, exist_ok=True)
+    _mark_hidden(root)
+    return root
+
+
+def cleanup_update_artifacts(*, max_age_seconds: int = 48 * 60 * 60) -> None:
+    root = _update_root()
+    if not root.exists():
+        return
+    cutoff = time.time() - max(60, int(max_age_seconds))
+    for path in root.iterdir():
+        if not path.is_file():
+            continue
+        if path.name == "update.log":
+            continue
+        with contextlib.suppress(OSError):
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+
+
+def check_github_update(timeout: float = 4.5) -> Optional[UpdateInfo]:
     if not getattr(sys, "frozen", False):
         return None
 
+    cleanup_update_artifacts()
     request = Request(UPDATE_API_LATEST, headers=_github_headers())
     try:
         with urlopen(request, timeout=timeout) as response:
@@ -146,20 +184,25 @@ def _validate_update_payload(raw: bytes, info: UpdateInfo) -> str:
 
 
 def download_github_update(info: UpdateInfo, target: Path, timeout: float = 30.0) -> Path:
-    """Download and validate an EXE next to the current launcher for replacement."""
     request = Request(info.download_url, headers=_github_headers(binary=True))
     with urlopen(request, timeout=timeout) as response:
         raw = response.read(UPDATE_MAX_BYTES + 1)
     _validate_update_payload(raw, info)
-    target = target.resolve()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{target.stem}.update-", suffix=".exe", dir=str(target.parent))
+
+    root = _prepare_update_root()
+    safe_version = re.sub(r"[^0-9A-Za-z._-]+", "-", info.version).strip("-") or "update"
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{APP_NAME}-{safe_version}-",
+        suffix=".exe",
+        dir=str(root),
+    )
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(raw)
             handle.flush()
             os.fsync(handle.fileno())
+        _mark_hidden(tmp)
         return tmp
     except Exception:
         with contextlib.suppress(FileNotFoundError):
@@ -171,42 +214,108 @@ def _ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+def _build_windows_replacer_script(downloaded: Path, target: Path, pid: int, digest: str, log_path: Path) -> str:
+    return (
+        "$ErrorActionPreference = 'Stop'\n"
+        f"$src = {_ps_quote(str(downloaded))}\n"
+        f"$target = {_ps_quote(str(target))}\n"
+        f"$pidToWait = {int(pid)}\n"
+        f"$expectedHash = {_ps_quote(digest.upper())}\n"
+        f"$logPath = {_ps_quote(str(log_path))}\n"
+        "$targetDir = Split-Path -Parent $target\n"
+        "$new = Join-Path $targetDir ('.NullLauncher.update-' + $pidToWait + '.exe')\n"
+        "$backup = Join-Path $targetDir ('.NullLauncher.previous-' + $pidToWait + '.exe')\n"
+        "$success = $false\n"
+        "function Write-UpdateLog([string]$message) {\n"
+        "  try { Add-Content -LiteralPath $logPath -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $message) -Encoding UTF8 } catch {}\n"
+        "}\n"
+        "function Hide-File([string]$path) {\n"
+        "  try { if (Test-Path -LiteralPath $path) { (Get-Item -LiteralPath $path -Force).Attributes = ((Get-Item -LiteralPath $path -Force).Attributes -bor [IO.FileAttributes]::Hidden) } } catch {}\n"
+        "}\n"
+        "Write-UpdateLog 'Updater helper started.'\n"
+        "try { Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue } catch {}\n"
+        "for ($attempt = 0; $attempt -lt 120 -and -not $success; $attempt++) {\n"
+        "  try {\n"
+        "    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
+        "    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "    Copy-Item -LiteralPath $src -Destination $new -Force\n"
+        "    Hide-File $new\n"
+        "    $newHash = (Get-FileHash -LiteralPath $new -Algorithm SHA256).Hash.ToUpperInvariant()\n"
+        "    if ($newHash -ne $expectedHash) { throw 'Staged update hash mismatch.' }\n"
+        "    if (Test-Path -LiteralPath $target) {\n"
+        "      try {\n"
+        "        [System.IO.File]::Replace($new, $target, $backup, $true)\n"
+        "      } catch {\n"
+        "        Move-Item -LiteralPath $target -Destination $backup -Force\n"
+        "        try { Move-Item -LiteralPath $new -Destination $target -Force }\n"
+        "        catch { Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue; throw }\n"
+        "      }\n"
+        "    } else {\n"
+        "      Move-Item -LiteralPath $new -Destination $target -Force\n"
+        "    }\n"
+        "    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToUpperInvariant()\n"
+        "    if ($targetHash -ne $expectedHash) {\n"
+        "      Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue\n"
+        "      if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target -Force }\n"
+        "      throw 'Installed update hash mismatch.'\n"
+        "    }\n"
+        "    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "    Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue\n"
+        "    $success = $true\n"
+        "    Write-UpdateLog 'Update installed successfully.'\n"
+        "  } catch {\n"
+        "    Write-UpdateLog ('Attempt ' + ($attempt + 1) + ' failed: ' + $_.Exception.Message)\n"
+        "    if ((-not (Test-Path -LiteralPath $target)) -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue }\n"
+        "    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
+        "    Start-Sleep -Milliseconds 500\n"
+        "  }\n"
+        "}\n"
+        "Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
+        "Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue\n"
+        "if (Test-Path -LiteralPath $target) {\n"
+        "  try { Start-Process -FilePath $target -WorkingDirectory $targetDir } catch { Write-UpdateLog ('Restart failed: ' + $_.Exception.Message) }\n"
+        "}\n"
+        "if (-not $success) { Write-UpdateLog 'Update failed; the previous launcher was restored when possible.' }\n"
+        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+    )
+
+
 def spawn_update_replacer(downloaded: Path, target: Path) -> None:
-    """Replace the running EXE after it exits, then launch the new build."""
     downloaded = downloaded.resolve()
     target = target.resolve()
 
     if os.name == "nt" and getattr(sys, "frozen", False):
-        fd, script_name = tempfile.mkstemp(prefix="nulllauncher-update-", suffix=".ps1")
-        os.close(fd)
-        script = Path(script_name)
+        root = _prepare_update_root()
+        log_path = root.parent / "update.log"
+        digest = hashlib.sha256(downloaded.read_bytes()).hexdigest()
+        script = root / f".apply-{uuid.uuid4().hex}.ps1"
         script.write_text(
-            "$ErrorActionPreference = 'SilentlyContinue'\n"
-            f"$src = {_ps_quote(str(downloaded))}\n"
-            f"$target = {_ps_quote(str(target))}\n"
-            f"$pidToWait = {os.getpid()}\n"
-            "Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue\n"
-            "$backup = $target + '.bak'\n"
-            "if (Test-Path -LiteralPath $target) { Copy-Item -LiteralPath $target -Destination $backup -Force }\n"
-            "for ($i = 0; $i -lt 80; $i++) {\n"
-            "  try { Move-Item -LiteralPath $src -Destination $target -Force -ErrorAction Stop; break }\n"
-            "  catch { Start-Sleep -Milliseconds 125 }\n"
-            "}\n"
-            "if (Test-Path -LiteralPath $target) { Start-Process -FilePath $target -WorkingDirectory (Split-Path -Parent $target) }\n"
-            "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n",
+            _build_windows_replacer_script(downloaded, target, os.getpid(), digest, log_path),
             encoding="utf-8-sig",
         )
+        _mark_hidden(script)
+        powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        executable = str(powershell if powershell.exists() else "powershell.exe")
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
         subprocess.Popen(
-            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-            cwd=str(target.parent),
+            [
+                executable,
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+            ],
+            cwd=str(root),
             creationflags=flags,
             close_fds=True,
         )
         return
 
-                                                                             
-                                                  
     helper = r'''import os, subprocess, sys, time
 src, target, python = sys.argv[1:4]
 for _ in range(100):
