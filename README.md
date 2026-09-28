@@ -24,18 +24,6 @@ NullLauncher may use Minecraft-related files, services, and third-party mod load
 
 ---
 
-## Screenshots
-
-Screenshots can be added here later.
-
-Example:
-
-```md
-![NullLauncher](docs/screenshot-main.png)
-```
-
----
-
 ## Installation
 
 Download the latest release from:
