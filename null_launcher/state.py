@@ -65,6 +65,7 @@ DEFAULT_STATE: dict[str, Any] = {
         "theme_primary": DEFAULT_THEME["theme_primary"],
         "theme_subtitle": DEFAULT_THEME["theme_subtitle"],
         "theme_status": DEFAULT_THEME["theme_status"],
+        "news_filter_color": DEFAULT_THEME["news_filter_color"],
     },
 }
 
@@ -163,7 +164,7 @@ class StateStore:
         s["custom_java_path"] = str(s.get("custom_java_path") or "")
         language = str(s.get("language") or "en")
         s["language"] = language if language in LANGUAGES else "en"
-        for key in ("theme_primary", "theme_subtitle", "theme_status"):
+        for key in ("theme_primary", "theme_subtitle", "theme_status", "news_filter_color"):
             normalized, _ = _parse_rgb(s.get(key), DEFAULT_THEME[key])
             s[key] = normalized
 

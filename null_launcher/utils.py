@@ -206,7 +206,7 @@ def _cmd_filter_image(image: Any, max_pixel_width: int, max_pixel_height: int) -
     gray = ImageOps.autocontrast(resized.convert("L"), cutoff=1)
     gray = ImageEnhance.Contrast(gray).enhance(1.24)
     gray = gray.point(lambda v: int(round(v / 17.0)) * 17)
-    r, g, b = cfg.THEME_PRIMARY_RGB
+    r, g, b = cfg.NEWS_FILTER_RGB
     dark = (max(0, r // 40), max(0, g // 40), max(0, b // 40))
     light = (max(48, r), max(48, g), max(48, b))
     styled = ImageOps.colorize(gray, black=dark, white=light)

@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.10.3"
+    assert APP_VERSION == "1.10.4"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -92,3 +92,36 @@ def test_launch_text_exists_for_every_language():
     }
     for language in LANGUAGES:
         assert keys <= I18N[language].keys()
+
+
+def test_news_filter_color_is_independent_from_primary_theme():
+    from PIL import Image
+    from null_launcher import config
+    from null_launcher.utils import _cmd_filter_image
+
+    settings = {
+        "language": "en",
+        "theme_primary": "#FF0000",
+        "theme_subtitle": "#9AA4AD",
+        "theme_status": "#737D86",
+        "news_filter_color": "#00FF00",
+    }
+    config.apply_runtime_preferences(settings)
+    image = Image.new("RGB", (64, 48), "white")
+    filtered = _cmd_filter_image(image, 64, 48)
+    r, g, b = filtered.getpixel((10, 10))
+    assert g > r and g > b
+    config.apply_runtime_preferences({
+        "language": "en",
+        "theme_primary": config.DEFAULT_THEME["theme_primary"],
+        "theme_subtitle": config.DEFAULT_THEME["theme_subtitle"],
+        "theme_status": config.DEFAULT_THEME["theme_status"],
+        "news_filter_color": config.DEFAULT_THEME["news_filter_color"],
+    })
+
+
+def test_news_filter_label_exists_for_every_language():
+    from null_launcher.config import I18N, LANGUAGES
+
+    for language in LANGUAGES:
+        assert I18N[language].get("news_filter_color")

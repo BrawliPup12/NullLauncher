@@ -860,7 +860,7 @@ class NullLauncher:
                 MenuItem(f"{tr('show_snapshots')}: {yn(s['show_snapshots'])}", "snapshots"), MenuItem(f"{tr('show_old')}: {yn(s['show_old_versions'])}", "old_versions"), MenuItem(f"{tr('load_news')}: {yn(s['news_enabled'])}", "news"),
                 MenuItem(section_label(tr("settings_interface")), selectable=False),
                 MenuItem(f"{tr('language')}: {lang_name}", "language"),
-                MenuItem(f"{tr('primary_color')}: {s['theme_primary']}", "color_primary"), MenuItem(f"{tr('subtitle_color')}: {s['theme_subtitle']}", "color_subtitle"), MenuItem(f"{tr('status_color')}: {s['theme_status']}", "color_status"),
+                MenuItem(f"{tr('primary_color')}: {s['theme_primary']}", "color_primary"), MenuItem(f"{tr('subtitle_color')}: {s['theme_subtitle']}", "color_subtitle"), MenuItem(f"{tr('status_color')}: {s['theme_status']}", "color_status"), MenuItem(f"{tr('news_filter_color')}: {s['news_filter_color']}", "color_news_filter"),
                 MenuItem(f"{tr('mouse_menu')}: {yn(s['mouse_enabled'])}", "mouse", hint=tr("after_restart")),
                 MenuItem(section_label(tr("settings_launch")), selectable=False),
                 MenuItem(f"{tr('default_ram')}: {s['default_min_ram_mb']}–{s['default_max_ram_mb']} MB", "ram"), MenuItem(f"{tr('repair')}: {yn(s['repair_before_launch'])}", "repair"), MenuItem(f"{tr('close_after')}: {yn(s['close_launcher_on_game_start'])}", "close"),
@@ -898,8 +898,8 @@ class NullLauncher:
                                                                                    
                                                                                         
                     s["language"] = selected_language; self.store.save(); apply_runtime_preferences(s)
-            elif action in ("color_primary", "color_subtitle", "color_status"):
-                key = {"color_primary":"theme_primary","color_subtitle":"theme_subtitle","color_status":"theme_status"}[action]
+            elif action in ("color_primary", "color_subtitle", "color_status", "color_news_filter"):
+                key = {"color_primary":"theme_primary","color_subtitle":"theme_subtitle","color_status":"theme_status","color_news_filter":"news_filter_color"}[action]
                 normalized = normalize_user_color(self.term.prompt(tr("color_prompt"), s[key]))
                 if normalized:
                     s[key] = normalized; self.store.save(); apply_runtime_preferences(s); self.term._last_frame = []; self.term._last_graphic_key = None; self.term._sixel_cache.clear()

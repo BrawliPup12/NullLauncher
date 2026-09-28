@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Iterable, Optional
 
 APP_NAME = "NullLauncher"
-APP_VERSION = "1.10.3"
+APP_VERSION = "1.10.4"
 REQUIRED_MLL = "8.0"
 REQUIRED_PILLOW = "10.0"
 MIN_PYTHON = (3, 10)
@@ -80,6 +80,7 @@ DEFAULT_THEME = {
     "theme_primary": "#62F4FF",
     "theme_subtitle": "#9AA4AD",
     "theme_status": "#737D86",
+    "news_filter_color": "#62F4FF",
 }
 
 LANGUAGES: dict[str, dict[str, str]] = {
@@ -246,11 +247,31 @@ for _lang, _strings in _LAUNCH_TEXT.items():
     if _lang in I18N:
         I18N[_lang].update(_strings)
 
+
+_NEWS_FILTER_TEXT = {
+    "en": {"news_filter_color":"News image filter color"},
+    "ru": {"news_filter_color":"Цвет фильтра изображений новостей"},
+    "uk": {"news_filter_color":"Колір фільтра зображень новин"},
+    "be": {"news_filter_color":"Колер фільтра выяў навін"},
+    "pl": {"news_filter_color":"Kolor filtra obrazów aktualności"},
+    "de": {"news_filter_color":"Filterfarbe für News-Bilder"},
+    "fr": {"news_filter_color":"Couleur du filtre des images d’actualité"},
+    "es": {"news_filter_color":"Color del filtro de imágenes de noticias"},
+    "pt-BR": {"news_filter_color":"Cor do filtro das imagens de notícias"},
+    "zh-CN": {"news_filter_color":"新闻图片滤镜颜色"},
+    "ja": {"news_filter_color":"ニュース画像フィルター色"},
+    "ko": {"news_filter_color":"뉴스 이미지 필터 색상"},
+}
+for _lang, _strings in _NEWS_FILTER_TEXT.items():
+    if _lang in I18N:
+        I18N[_lang].update(_strings)
+
 CURRENT_LANGUAGE = "en"
 PRIMARY_COLOR = "\x1b[38;2;98;244;255m"
 SUBTITLE_COLOR = "\x1b[38;2;154;164;173m"
 STATUS_COLOR = "\x1b[38;2;115;125;134m"
 THEME_PRIMARY_RGB = (98, 244, 255)
+NEWS_FILTER_RGB = (98, 244, 255)
 
 def tr(key: str, **values: Any) -> str:
     table = I18N.get(CURRENT_LANGUAGE, I18N["en"])
@@ -288,17 +309,19 @@ def normalize_user_color(value: str) -> Optional[str]:
     return None
 
 def apply_runtime_preferences(settings: dict[str, Any]) -> None:
-    global CURRENT_LANGUAGE, PRIMARY_COLOR, SUBTITLE_COLOR, STATUS_COLOR, THEME_PRIMARY_RGB
+    global CURRENT_LANGUAGE, PRIMARY_COLOR, SUBTITLE_COLOR, STATUS_COLOR, THEME_PRIMARY_RGB, NEWS_FILTER_RGB
     language = str(settings.get("language") or "en")
     CURRENT_LANGUAGE = language if language in LANGUAGES else "en"
     p, prgb = _parse_rgb(settings.get("theme_primary"), DEFAULT_THEME["theme_primary"])
     s, srgb = _parse_rgb(settings.get("theme_subtitle"), DEFAULT_THEME["theme_subtitle"])
     st, strgb = _parse_rgb(settings.get("theme_status"), DEFAULT_THEME["theme_status"])
-    settings["theme_primary"], settings["theme_subtitle"], settings["theme_status"] = p, s, st
+    nf, nfrgb = _parse_rgb(settings.get("news_filter_color"), DEFAULT_THEME["news_filter_color"])
+    settings["theme_primary"], settings["theme_subtitle"], settings["theme_status"], settings["news_filter_color"] = p, s, st, nf
     PRIMARY_COLOR = f"\x1b[38;2;{prgb[0]};{prgb[1]};{prgb[2]}m"
     SUBTITLE_COLOR = f"\x1b[38;2;{srgb[0]};{srgb[1]};{srgb[2]}m"
     STATUS_COLOR = f"\x1b[38;2;{strgb[0]};{strgb[1]};{strgb[2]}m"
     THEME_PRIMARY_RGB = prgb
+    NEWS_FILTER_RGB = nfrgb
 
 def section_label(text: str) -> str:
     return f"──── {text} ────"
