@@ -37,7 +37,7 @@ from typing import Any, Callable, Iterable, Optional
 
 from . import config as cfg
 from .config import APP_NAME, APP_VERSION, BOLD, DIM, LANGUAGES, MC_NAME_RE, RED, RESET, SPLASH_LINES, YELLOW, apply_runtime_preferences, normalize_user_color, section_label, tr
-from .utils import brand_logo_lines, center_ansi, centered_splash_progress, clean_markup, clip, decode_article_image, now_iso, offline_uuid, proxy_game_arguments, proxy_jvm_arguments, proxy_label, recommended_ram_mb, safe_int, slug, tail_text, valid_proxy_host, wrap_plain
+from .utils import brand_logo_lines, center_ansi, centered_splash_progress, clean_markup, clip, decode_article_image, normalize_version_type, now_iso, offline_uuid, proxy_game_arguments, proxy_jvm_arguments, proxy_label, recommended_ram_mb, safe_int, slug, tail_text, valid_proxy_host, wrap_plain
 from .updater import check_github_update, download_github_update, running_artifact_path, spawn_update_replacer
 from .state import StateStore
 from .terminal import Menu, MenuGraphic, MenuItem, Terminal

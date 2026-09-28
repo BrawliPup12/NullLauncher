@@ -53,7 +53,7 @@ The launcher remains a console application (`console=True`) because the terminal
 
 ## GitHub Releases
 
-The included Actions workflow builds on `windows-latest`. A manual workflow run uploads `NullLauncher.exe` as an Actions artifact. Pushing a tag such as `v1.10.1` also creates/updates the GitHub Release and attaches `dist/NullLauncher.exe`.
+The included Actions workflow builds on `windows-latest`. A manual workflow run uploads `NullLauncher.exe` as an Actions artifact. Pushing a tag such as `v1.10.2` also creates/updates the GitHub Release and attaches `dist/NullLauncher.exe`.
 
 Before tagging a release, keep the version in `null_launcher/config.py` and `pyproject.toml` in sync.
 

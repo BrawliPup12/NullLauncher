@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.10.1"
+    assert APP_VERSION == "1.10.2"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -34,3 +34,37 @@ def test_da1_sixel_detection():
     assert Terminal._da1_reports_sixel("[?61;4;6;7;14c") is True
     assert Terminal._da1_reports_sixel("\x1b[?1;0c") is False
     assert Terminal._da1_reports_sixel("garbage") is None
+
+
+def test_versions_screen_builds_version_rows_without_name_error():
+    from null_launcher.app import NullLauncher
+    from null_launcher.catalog import VersionEntry
+
+    class DummyData:
+        def build_catalog(self, filter_kind, query):
+            return [
+                VersionEntry(
+                    key="vanilla:1.21.8",
+                    label="1.21.8",
+                    kind="vanilla",
+                    mc_version="1.21.8",
+                    version_type="release",
+                    installed=False,
+                )
+            ]
+
+    class DummyMenu:
+        def __init__(self):
+            self.items = None
+
+        def choose(self, title, items, **kwargs):
+            self.items = items
+            return ("back", None)
+
+    launcher = object.__new__(NullLauncher)
+    launcher.data = DummyData()
+    launcher.menu = DummyMenu()
+    launcher.versions_screen()
+
+    assert launcher.menu.items is not None
+    assert any(getattr(item, "hint", None) == "release" for item in launcher.menu.items)
