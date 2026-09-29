@@ -41,12 +41,14 @@ from .state import StateStore
 from .terminal import Terminal
 from .minecraft import ensure_image_library, ensure_minecraft_library
 from .app import NullLauncher
+from .instance import SingleInstanceGuard, show_already_running
 from .diagnostics import diagnose, setup_logging
 
 def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(prog=APP_NAME, description="Single-file terminal Minecraft launcher")
     p.add_argument("--diagnose", action="store_true", help="print environment diagnostics")
     p.add_argument("--version", action="store_true", help="print version")
+    p.add_argument("--update-health-file", default="", help=argparse.SUPPRESS)
     return p.parse_args(argv)
 
 
@@ -61,10 +63,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(tr("python_required", app=APP_NAME, major=MIN_PYTHON[0], minor=MIN_PYTHON[1]), file=sys.stderr)
         return 2
 
+    if args.update_health_file:
+        os.environ["NULLLAUNCHER_UPDATE_HEALTH_FILE"] = str(args.update_health_file)
+
     base = app_data_dir()
     logger = setup_logging(base)
     store = StateStore(base)
     apply_runtime_preferences(store.settings)
+    guard = SingleInstanceGuard(APP_NAME)
+    if not guard.acquire():
+        show_already_running(APP_NAME, tr("already_running"))
+        return 0
+
     term = Terminal(mouse_enabled=store.settings["mouse_enabled"])
 
     def restore_on_signal(signum: int, frame: Any) -> None:
@@ -87,6 +97,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"{RED}{BOLD}{tr('fatal')}{RESET}\n")
         print(f"{type(exc).__name__}: {exc}\n")
         print(f"{tr('log')}: {base / 'null_launcher.log'}")
+        try:
+            input("\nEnter...")
+        except Exception:
+            pass
         return 1
     finally:
         term.restore()
+        guard.release()
+

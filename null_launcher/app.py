@@ -38,8 +38,9 @@ from typing import Any, Callable, Iterable, Optional
 from . import config as cfg
 from .config import APP_NAME, APP_VERSION, BOLD, DIM, LANGUAGES, MC_NAME_RE, RED, RESET, SPLASH_LINES, YELLOW, apply_runtime_preferences, normalize_user_color, section_label, tr
 from .utils import brand_logo_lines, center_ansi, centered_splash_progress, clean_markup, clip, decode_article_image, normalize_version_type, now_iso, offline_uuid, proxy_game_arguments, proxy_jvm_arguments, proxy_label, recommended_ram_mb, safe_int, slug, tail_text, valid_proxy_host, wrap_plain
-from .updater import check_github_update, download_github_update, running_artifact_path, spawn_update_replacer
+from .updater import check_github_update, clear_update_download_cache, consume_pending_update, download_github_update, running_artifact_path, signal_update_health, spawn_update_replacer
 from .state import StateStore
+from .download_cache import DownloadCache
 from .terminal import Menu, MenuGraphic, MenuItem, Terminal
 from .news import NEWS_LIMIT, _article_from_url, _download_article_image_bytes, _news_translation_ident, _news_translation_signature
 from .catalog import LauncherData, VersionEntry
@@ -57,6 +58,7 @@ class NullLauncher:
         self.data = LauncherData(store, logger)
         self.running = True
         self._news_image_cache: dict[str, Any] = {}
+        self.download_cache = DownloadCache(self.store.base / "download-cache", max_entries=96, max_age_seconds=30 * 24 * 60 * 60)
 
     def splash(self) -> None:
         import random
@@ -171,16 +173,19 @@ class NullLauncher:
             render_splash()
             time.sleep(0.20)
             self.term.restore()
-            spawn_update_replacer(Path(downloaded), running_artifact_path())
+            spawn_update_replacer(Path(downloaded), running_artifact_path(), info)
             raise SystemExit(0)
 
         warning = tr("cache_warning") if self.data.network_errors else ""
         render_splash(warning=warning)
         time.sleep(0.20)
         self.term._view_key = "__splash__"
+        signal_update_health()
 
     def run(self) -> int:
+        self.first_run_setup()
         self.splash()
+        self.show_post_update()
         while self.running:
             apply_runtime_preferences(self.store.settings)
             account = self.store.account()
@@ -207,14 +212,142 @@ class NullLauncher:
                 bottom_item=MenuItem(tr("news"), "news"),
                 view_key="main",
             )
-            if action == "play": self.play()
-            elif action == "versions": self.versions_screen()
-            elif action == "accounts": self.accounts_screen()
-            elif action == "proxies": self.proxies_screen()
-            elif action == "settings": self.settings_screen()
-            elif action == "news": self.news_screen()
-            elif action == "exit": self.running = False
+            try:
+                if action == "play": self.play()
+                elif action == "versions": self.versions_screen()
+                elif action == "accounts": self.accounts_screen()
+                elif action == "proxies": self.proxies_screen()
+                elif action == "settings": self.settings_screen()
+                elif action == "news": self.news_screen()
+                elif action == "exit": self.running = False
+            except SystemExit:
+                raise
+            except Exception as exc:
+                self.log.exception("Screen failed: %s", action)
+                self.crash_screen(
+                    tr("launcher_crash_title"),
+                    f"{type(exc).__name__}: {exc}",
+                    self.store.base / "null_launcher.log",
+                )
         return 0
+
+    def first_run_setup(self) -> None:
+        s = self.store.settings
+        if s.get("first_run_complete"):
+            return
+        language_items = [MenuItem(info["name"], code) for code, info in LANGUAGES.items()]
+        selected_language = self.menu.choose(
+            tr("first_run_title"),
+            language_items,
+            subtitle=tr("first_run_language"),
+            allow_escape=False,
+            spacer_after_title=True,
+            view_key="first-run-language",
+        )
+        if selected_language in LANGUAGES:
+            s["language"] = selected_language
+            apply_runtime_preferences(s)
+
+        raw_path = self.term.prompt(tr("first_run_minecraft_dir"), s["minecraft_dir"])
+        path = Path(raw_path).expanduser()
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            s["minecraft_dir"] = str(path)
+        except OSError:
+            pass
+
+        min_ram = safe_int(self.term.prompt(tr("first_run_ram_min"), str(s["default_min_ram_mb"])), s["default_min_ram_mb"], 256, 65536)
+        max_ram = safe_int(self.term.prompt(tr("first_run_ram_max"), str(s["default_max_ram_mb"])), s["default_max_ram_mb"], 512, 131072)
+        s["default_min_ram_mb"] = min_ram
+        s["default_max_ram_mb"] = max(min_ram, max_ram)
+
+        while True:
+            name = self.term.prompt(tr("first_run_account"), "").strip()
+            if not name:
+                break
+            if MC_NAME_RE.fullmatch(name):
+                if not any(a["name"].lower() == name.lower() for a in self.store.data["accounts"]):
+                    self.store.data["accounts"].append({"name": name, "uuid": offline_uuid(name), "type": "offline"})
+                self.store.data["selected_account"] = name
+                break
+            self.message(tr("first_run_title"), tr("first_run_invalid_account"), error=True)
+
+        s["first_run_complete"] = True
+        self.store.save()
+        apply_runtime_preferences(s)
+        self.message(tr("first_run_done_title"), tr("first_run_done_body"))
+
+    def show_post_update(self) -> None:
+        payload = consume_pending_update(APP_VERSION)
+        if not payload:
+            return
+        notes = str(payload.get("notes") or "").replace("\r", "").strip()
+        if notes:
+            cleaned_lines: list[str] = []
+            for raw in notes.splitlines():
+                line = raw.strip()
+                if not line:
+                    if cleaned_lines and cleaned_lines[-1] != "":
+                        cleaned_lines.append("")
+                    continue
+                line = re.sub(r"^#{1,6}\s*", "", line)
+                line = re.sub(r"^[*+-]\s+", "• ", line)
+                line = re.sub(r"\[([^]]+)\]\([^)]+\)", r"\1", line)
+                line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)
+                line = line.replace("`", "")
+                cleaned_lines.append(line)
+            notes = "\n".join(cleaned_lines[:40]).strip()
+        if not notes:
+            notes = tr("no_release_notes")
+        old = clean_markup(payload.get("previous_version") or "?")
+        new = clean_markup(payload.get("version") or APP_VERSION)
+        subtitle = tr("updated_from", old=old, new=new) + "\n\n" + notes
+        self.menu.choose(
+            tr("whats_new_title", version=new),
+            [MenuItem(tr("whats_new_continue"), "continue")],
+            subtitle=subtitle,
+            allow_escape=False,
+            spacer_after_title=True,
+            content_width_limit=120,
+            view_key=f"whats-new:{new}",
+        )
+
+    def _open_path(self, path: Path) -> None:
+        path = Path(path)
+        if os.name == "nt":
+            os.startfile(str(path))
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(path)])
+        else:
+            subprocess.Popen(["xdg-open", str(path)])
+
+    def crash_screen(self, title: str, details: str, log_path: Optional[Path] = None) -> None:
+        log = Path(log_path) if log_path else None
+        while True:
+            items: list[MenuItem] = []
+            if log and log.exists():
+                items.append(MenuItem(tr("open_log"), "open-log"))
+                items.append(MenuItem(tr("open_log_folder"), "open-folder"))
+            items.append(MenuItem(tr("return_menu"), "back"))
+            subtitle = f"{details}\n\n{tr('crash_hint')}"
+            action = self.menu.choose(
+                f"{RED}{title}{RESET}",
+                items,
+                subtitle=subtitle,
+                allow_escape=True,
+                spacer_after_title=True,
+                content_width_limit=140,
+                view_key="crash-screen",
+            )
+            if not action or action == "back":
+                return
+            try:
+                if action == "open-log" and log:
+                    self._open_path(log)
+                elif action == "open-folder" and log:
+                    self._open_path(log.parent)
+            except Exception as exc:
+                self.log.warning("Could not open crash log: %s", exc)
 
     def manual_update_check(self) -> None:
         """Check GitHub Releases on demand; install a newer release immediately."""
@@ -239,7 +372,7 @@ class NullLauncher:
             return
         info, downloaded = result
         self.term.restore()
-        spawn_update_replacer(Path(downloaded), running_artifact_path())
+        spawn_update_replacer(Path(downloaded), running_artifact_path(), info)
         raise SystemExit(0)
 
                                                                              
@@ -308,41 +441,24 @@ class NullLauncher:
         return image_url if image_url.startswith(("http://", "https://")) else ""
 
     def _load_news_image(self, entry: dict[str, Any]) -> Optional[Any]:
-        """Decode a real article cover once and reuse the original pixels on resize."""
         image_url = self._resolve_news_image_url(entry)
         if not image_url:
             return None
         cached = self._news_image_cache.get(image_url)
         if cached is not None:
             return cached
-
-        cache_dir = self.store.base / "news-images"
-        cache_path = cache_dir / (hashlib.sha256(image_url.encode("utf-8")).hexdigest() + ".img")
-        raw: Optional[bytes] = None
         try:
-            if cache_path.exists() and cache_path.stat().st_size > 0:
-                raw = cache_path.read_bytes()
-                image = decode_article_image(raw)
-                self._news_image_cache[image_url] = image
-                return image
-        except Exception:
-            with contextlib.suppress(OSError):
-                cache_path.unlink()
-
-        try:
-            raw = _download_article_image_bytes(image_url)
+            raw = self.download_cache.fetch(
+                image_url,
+                lambda: _download_article_image_bytes(image_url),
+                max_age_seconds=30 * 24 * 60 * 60,
+            )
             image = decode_article_image(raw)
             self._news_image_cache[image_url] = image
-            try:
-                cache_dir.mkdir(parents=True, exist_ok=True)
-                tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
-                tmp.write_bytes(raw)
-                os.replace(tmp, cache_path)
-            except OSError:
-                pass
             return image
         except Exception as exc:
             self.log.warning("News image download/decode failed: %s (%s)", image_url, exc)
+            self.download_cache.remove(image_url)
             return None
 
     def news_screen(self) -> None:
@@ -867,7 +983,7 @@ class NullLauncher:
                 MenuItem(section_label(tr("settings_updates")), selectable=False),
                 MenuItem(f"{tr('auto_update')}: {yn(s['auto_update'])}", "auto_update"), MenuItem(tr("check_updates_now"), "check_update"),
                 MenuItem(section_label(tr("settings_actions")), selectable=False),
-                MenuItem(tr("open_data"), "open_data"), MenuItem(tr("reset_defaults"), "reset"), MenuItem(tr("back"), "back"),
+                MenuItem(tr("clear_download_cache"), "clear_cache"), MenuItem(tr("open_data"), "open_data"), MenuItem(tr("reset_defaults"), "reset"), MenuItem(tr("back"), "back"),
             ]
             action = self.menu.choose(tr("settings"), items, spacer_after_title=True, view_key="launcher-settings")
             if not action or action == "back": return
@@ -904,6 +1020,12 @@ class NullLauncher:
                 if normalized:
                     s[key] = normalized; self.store.save(); apply_runtime_preferences(s); self.term._last_frame = []; self.term._last_graphic_key = None; self.term._sixel_cache.clear()
                 else: self.message("Color", tr("color_error"), error=True)
+            elif action == "clear_cache":
+                self.download_cache.clear()
+                clear_update_download_cache()
+                self._news_image_cache.clear()
+                self.term._sixel_cache.clear()
+                self.message(tr("clear_download_cache"), tr("download_cache_cleared"))
             elif action == "open_data":
                 try:
                     self.store.base.mkdir(parents=True, exist_ok=True)
@@ -945,16 +1067,113 @@ class NullLauncher:
             options["defaultExecutablePath"] = java
         return options
 
-    def _ensure_legacy_java(self, version_id: str) -> str:
-        """Provide Mojang's legacy Java for versions whose metadata has no runtime."""
+    def _render_launch_progress(
+        self,
+        version_id: str,
+        stage: int,
+        total: int,
+        stage_title: str,
+        status: str = "",
+        progress: int = 0,
+        maximum: int = 0,
+        *,
+        animate: bool = False,
+    ) -> None:
+        size = self.term.size()
+        w = max(20, int(size.columns))
+        h = max(8, int(size.lines))
+        content_w = max(16, min(140, w - 4))
+        overall_w = max(10, min(54, content_w - 18))
+        overall_ratio = max(0.0, min(1.0, stage / max(1, total)))
+        overall_done = int(overall_w * overall_ratio)
+        overall = "█" * overall_done + "░" * (overall_w - overall_done)
+        content: list[str] = brand_logo_lines(w, h) + [""]
+        content.extend(f"{BOLD}{line}{RESET}" for line in wrap_plain(tr("launching_title", version=version_id), content_w, max_lines=2))
+        content.append(f"{cfg.SUBTITLE_COLOR}{DIM}{tr('launch_step', current=stage, total=total)}{RESET}")
+        content.append(f"{cfg.PRIMARY_COLOR}{overall}{RESET}")
+        content.append("")
+        content.extend(f"{BOLD}{line}{RESET}" for line in wrap_plain(stage_title, content_w, max_lines=2))
+
+        if maximum > 0:
+            file_w = max(8, min(64, content_w - 18))
+            ratio = max(0.0, min(1.0, int(progress) / max(1, int(maximum))))
+            done = int(file_w * ratio)
+            bar = "█" * done + "░" * (file_w - done)
+            percent = int(round(ratio * 100))
+            content.append(f"{cfg.PRIMARY_COLOR}{bar}{RESET}  {percent:3d}%")
+        else:
+            spinner = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.monotonic() * 10) % 10]
+            content.append(f"{cfg.PRIMARY_COLOR}{spinner}{RESET}")
+        if status:
+            content.extend(f"{cfg.SUBTITLE_COLOR}{DIM}{line}{RESET}" for line in wrap_plain(status, content_w, max_lines=3))
+        if h >= 18:
+            content.extend(["", f"{cfg.SUBTITLE_COLOR}{DIM}{tr('do_not_close')}{RESET}"])
+        frame = [""] * h
+        start = max(0, (h - len(content)) // 2)
+        for i, line in enumerate(content):
+            if start + i < h:
+                frame[start + i] = center_ansi(line, w)
+        self.term._view_key = f"launch:{version_id}:{stage}"
+        self.term.render(frame, animate=animate)
+
+    def _launch_progress_task(
+        self,
+        version_id: str,
+        stage: int,
+        total: int,
+        stage_title: str,
+        fn: Callable[[dict[str, Callable]], Any],
+    ) -> Any:
+        q: queue.Queue[tuple[str, Any]] = queue.Queue()
+        state = {"status": stage_title, "progress": 0, "max": 0, "done": False, "error": None, "result": None}
+
+        callbacks = {
+            "setStatus": lambda value: q.put(("status", str(value))),
+            "setProgress": lambda value: q.put(("progress", int(value))),
+            "setMax": lambda value: q.put(("max", int(value))),
+        }
+
+        def worker() -> None:
+            try:
+                q.put(("result", fn(callbacks)))
+            except BaseException as exc:
+                q.put(("error", exc))
+            finally:
+                q.put(("done", True))
+
+        thread = threading.Thread(target=worker, name="NullLaunchTask", daemon=False)
+        thread.start()
+        first = True
+        while not state["done"]:
+            try:
+                while True:
+                    key, value = q.get_nowait()
+                    state[key] = value
+            except queue.Empty:
+                pass
+            self._render_launch_progress(
+                version_id, stage, total, stage_title,
+                str(state["status"]), int(state["progress"]), int(state["max"]),
+                animate=first,
+            )
+            first = False
+            time.sleep(0.05)
+        thread.join()
+        while not q.empty():
+            key, value = q.get_nowait()
+            state[key] = value
+        if state["error"] is not None:
+            raise state["error"]
+        return state["result"]
+
+    def _ensure_legacy_java(self, version_id: str, launch_stage: Optional[tuple[int, int]] = None) -> str:
         if self.store.settings.get("custom_java_path"):
             return ""
         try:
             info = self.mll.runtime.get_version_runtime_information(version_id, str(self.store.minecraft_dir))
             if info is not None:
-                return ""                                                           
+                return ""
         except Exception:
-                                                                                                 
             return ""
         try:
             runtime_name = "jre-legacy"
@@ -964,10 +1183,17 @@ class NullLauncher:
             available = list(self.mll.runtime.get_jvm_runtimes())
             if runtime_name not in available:
                 return ""
-            self.progress_task(
-                tr("install_java_runtime"),
-                lambda cb: self.mll.runtime.install_jvm_runtime(runtime_name, str(self.store.minecraft_dir), callback=cb),
-            )
+            if launch_stage:
+                stage, total = launch_stage
+                self._launch_progress_task(
+                    version_id, stage, total, tr("launch_stage_java"),
+                    lambda cb: self.mll.runtime.install_jvm_runtime(runtime_name, str(self.store.minecraft_dir), callback=cb),
+                )
+            else:
+                self.progress_task(
+                    tr("install_java_runtime"),
+                    lambda cb: self.mll.runtime.install_jvm_runtime(runtime_name, str(self.store.minecraft_dir), callback=cb),
+                )
             path = self.mll.runtime.get_executable_path(runtime_name, str(self.store.minecraft_dir))
             return str(path or "")
         except Exception as exc:
@@ -990,38 +1216,51 @@ class NullLauncher:
             self.message(tr("version_missing_title"), tr("version_missing_body", version=version_id), error=True)
             return
 
+        log_path = self.store.base / "game-latest.log"
+        launcher_log = self.store.base / "null_launcher.log"
+        total_stages = 5
         try:
+            self._render_launch_progress(version_id, 1, total_stages, tr("launch_stage_prepare"), tr("preparing"), animate=True)
+
             if self.store.settings["repair_before_launch"]:
-                self.progress_task(
-                    tr("verify_version", version=version_id),
+                self._launch_progress_task(
+                    version_id, 2, total_stages, tr("launch_stage_verify"),
                     lambda cb: self.mll.install.install_minecraft_version(version_id, str(self.store.minecraft_dir), callback=cb),
                 )
-            auto_java = self._ensure_legacy_java(version_id)
+            else:
+                self._render_launch_progress(version_id, 2, total_stages, tr("launch_stage_verify"), tr("launch_skipped"))
+
+            self._render_launch_progress(version_id, 3, total_stages, tr("launch_stage_java"), tr("preparing"))
+            auto_java = self._ensure_legacy_java(version_id, (3, total_stages))
+
+            self._render_launch_progress(version_id, 4, total_stages, tr("launch_stage_command"), tr("preparing"))
             options = self._build_launch_options(account, version_id, auto_java)
             command = self.mll.command.get_minecraft_command(version_id, str(self.store.minecraft_dir), options)
             if not command:
                 raise RuntimeError(tr("empty_launch_command"))
-                                                                                   
             command.extend(proxy_game_arguments(self.store.proxy_profile()))
-            log_path = self.store.base / "game-latest.log"
+
+            self._render_launch_progress(version_id, 5, total_stages, tr("launch_stage_start"), tr("preparing"))
             log_path.parent.mkdir(parents=True, exist_ok=True)
             game_cwd = Path(options["gameDirectory"])
             game_cwd.mkdir(parents=True, exist_ok=True)
             log_file = log_path.open("w", encoding="utf-8", errors="replace")
-            creationflags = 0
-            if os.name == "nt":
-                creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-            process = subprocess.Popen(
-                command,
-                cwd=str(game_cwd),
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                creationflags=creationflags,
-            )
-            if self.store.settings["close_launcher_on_game_start"]:
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            try:
+                process = subprocess.Popen(
+                    command,
+                    cwd=str(game_cwd),
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    creationflags=creationflags,
+                )
+            finally:
                 log_file.close()
+
+            if self.store.settings["close_launcher_on_game_start"]:
                 self.running = False
                 return
+
             active_proxy = self.store.proxy_profile()
             proxy_line = f"{tr('proxy_label')}: {active_proxy['name']} · {proxy_label(active_proxy)}" if active_proxy else f"{tr('proxy_label')}: {tr('none')}"
             self.term._view_key = f"game-running:{version_id}"
@@ -1044,11 +1283,17 @@ class NullLauncher:
                 self.term.render(frame, animate=first_game_frame)
                 first_game_frame = False
                 time.sleep(0.10)
+
             code = int(process.returncode or 0)
-            log_file.close()
             if code != 0:
-                tail = tail_text(log_path, 16)
-                self.message(tr("game_failed_title"), f"{tr('exit_code')}: {code}\n\n{tr('last_log_lines')}:\n{tail or tr('empty_log')}", error=True)
+                tail = tail_text(log_path, 28)
+                details = f"{tr('exit_code')}: {code}\n\n{tr('last_log_lines')}:\n{tail or tr('empty_log')}"
+                self.crash_screen(tr("game_crash_title"), details, log_path)
         except Exception as exc:
             self.log.exception("Launch failed")
-            self.message(tr("launch_error_title"), f"{type(exc).__name__}: {exc}\n\n{tr('see_launcher_log')}", error=True)
+            self.crash_screen(
+                tr("launch_error_title"),
+                f"{type(exc).__name__}: {exc}\n\n{tr('see_launcher_log')}",
+                launcher_log,
+            )
+

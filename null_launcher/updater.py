@@ -17,13 +17,8 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import uuid
 
-from .config import (
-    APP_NAME,
-    APP_VERSION,
-    UPDATE_API_LATEST,
-    UPDATE_MAX_BYTES,
-    UPDATE_REPO_URL,
-)
+from .config import APP_NAME, APP_VERSION, UPDATE_API_LATEST, UPDATE_MAX_BYTES, UPDATE_REPO_URL
+from .download_cache import DownloadCache
 from .utils import clean_markup
 
 
@@ -36,6 +31,7 @@ class UpdateInfo:
     digest: str = ""
     source: str = "asset"
     asset_name: str = "NullLauncher.exe"
+    notes: str = ""
 
 
 def running_artifact_path() -> Path:
@@ -106,15 +102,18 @@ def cleanup_update_artifacts(*, max_age_seconds: int = 48 * 60 * 60) -> None:
     root = _update_root()
     if not root.exists():
         return
-    cutoff = time.time() - max(60, int(max_age_seconds))
+    now = time.time()
     for path in root.iterdir():
-        if not path.is_file():
+        if path.name in {"pending-update.json", "cache"}:
             continue
         if path.name == "update.log":
             continue
-        with contextlib.suppress(OSError):
-            if path.stat().st_mtime < cutoff:
+        try:
+            if path.is_file() and now - path.stat().st_mtime > max_age_seconds:
                 path.unlink()
+        except OSError:
+            pass
+    DownloadCache(root / "cache", max_entries=4, max_age_seconds=14 * 24 * 60 * 60).cleanup()
 
 
 def check_github_update(timeout: float = 4.5) -> Optional[UpdateInfo]:
@@ -156,6 +155,7 @@ def check_github_update(timeout: float = 4.5) -> Optional[UpdateInfo]:
     if selected is None or not str(selected.get("browser_download_url") or "").startswith("https://"):
         raise RuntimeError(f"Release {tag or version} has no NullLauncher.exe asset")
 
+    notes = str(payload.get("body") or "").replace("\r\n", "\n").strip()[:12000]
     return UpdateInfo(
         version=version,
         tag=tag or f"v{version}",
@@ -164,6 +164,7 @@ def check_github_update(timeout: float = 4.5) -> Optional[UpdateInfo]:
         digest=str(selected.get("digest") or ""),
         source="asset",
         asset_name=str(selected.get("name") or "NullLauncher.exe"),
+        notes=notes,
     )
 
 
@@ -183,19 +184,29 @@ def _validate_update_payload(raw: bytes, info: UpdateInfo) -> str:
     return info.version
 
 
-def download_github_update(info: UpdateInfo, target: Path, timeout: float = 30.0) -> Path:
+def _download_update_bytes(info: UpdateInfo, timeout: float) -> bytes:
     request = Request(info.download_url, headers=_github_headers(binary=True))
     with urlopen(request, timeout=timeout) as response:
-        raw = response.read(UPDATE_MAX_BYTES + 1)
-    _validate_update_payload(raw, info)
+        return response.read(UPDATE_MAX_BYTES + 1)
 
+
+def download_github_update(info: UpdateInfo, target: Path, timeout: float = 30.0) -> Path:
     root = _prepare_update_root()
+    cache = DownloadCache(root / "cache", max_entries=4, max_age_seconds=14 * 24 * 60 * 60)
+    raw = cache.get(info.download_url, max_age_seconds=14 * 24 * 60 * 60)
+    if raw is not None:
+        try:
+            _validate_update_payload(raw, info)
+        except Exception:
+            cache.remove(info.download_url)
+            raw = None
+    if raw is None:
+        raw = _download_update_bytes(info, timeout)
+        _validate_update_payload(raw, info)
+        cache.put(info.download_url, raw)
+
     safe_version = re.sub(r"[^0-9A-Za-z._-]+", "-", info.version).strip("-") or "update"
-    fd, tmp_name = tempfile.mkstemp(
-        prefix=f".{APP_NAME}-{safe_version}-",
-        suffix=".exe",
-        dir=str(root),
-    )
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{APP_NAME}-{safe_version}-", suffix=".exe", dir=str(root))
     tmp = Path(tmp_name)
     try:
         with os.fdopen(fd, "wb") as handle:
@@ -214,7 +225,19 @@ def _ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
-def _build_windows_replacer_script(downloaded: Path, target: Path, pid: int, digest: str, log_path: Path) -> str:
+def _build_windows_replacer_script(
+    downloaded: Path,
+    target: Path,
+    pid: int,
+    digest: str,
+    log_path: Path,
+    metadata_path: Optional[Path] = None,
+    health_path: Optional[Path] = None,
+) -> str:
+    root = downloaded.parent
+    meta = metadata_path or (root / ".pending-update-metadata.json")
+    health = health_path or (root / ".health-check")
+    pending = root / "pending-update.json"
     return (
         "$ErrorActionPreference = 'Stop'\n"
         f"$src = {_ps_quote(str(downloaded))}\n"
@@ -222,9 +245,13 @@ def _build_windows_replacer_script(downloaded: Path, target: Path, pid: int, dig
         f"$pidToWait = {int(pid)}\n"
         f"$expectedHash = {_ps_quote(digest.upper())}\n"
         f"$logPath = {_ps_quote(str(log_path))}\n"
+        f"$metaSrc = {_ps_quote(str(meta))}\n"
+        f"$pending = {_ps_quote(str(pending))}\n"
+        f"$healthFile = {_ps_quote(str(health))}\n"
         "$targetDir = Split-Path -Parent $target\n"
         "$new = Join-Path $targetDir ('.NullLauncher.update-' + $pidToWait + '.exe')\n"
         "$backup = Join-Path $targetDir ('.NullLauncher.previous-' + $pidToWait + '.exe')\n"
+        "$installed = $false\n"
         "$success = $false\n"
         "function Write-UpdateLog([string]$message) {\n"
         "  try { Add-Content -LiteralPath $logPath -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $message) -Encoding UTF8 } catch {}\n"
@@ -234,7 +261,7 @@ def _build_windows_replacer_script(downloaded: Path, target: Path, pid: int, dig
         "}\n"
         "Write-UpdateLog 'Updater helper started.'\n"
         "try { Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue } catch {}\n"
-        "for ($attempt = 0; $attempt -lt 120 -and -not $success; $attempt++) {\n"
+        "for ($attempt = 0; $attempt -lt 120 -and -not $installed; $attempt++) {\n"
         "  try {\n"
         "    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
         "    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
@@ -254,34 +281,51 @@ def _build_windows_replacer_script(downloaded: Path, target: Path, pid: int, dig
         "      Move-Item -LiteralPath $new -Destination $target -Force\n"
         "    }\n"
         "    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToUpperInvariant()\n"
-        "    if ($targetHash -ne $expectedHash) {\n"
-        "      Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue\n"
-        "      if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target -Force }\n"
-        "      throw 'Installed update hash mismatch.'\n"
-        "    }\n"
-        "    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
-        "    Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue\n"
-        "    $success = $true\n"
-        "    Write-UpdateLog 'Update installed successfully.'\n"
+        "    if ($targetHash -ne $expectedHash) { throw 'Installed update hash mismatch.' }\n"
+        "    Hide-File $backup\n"
+        "    $installed = $true\n"
+        "    Write-UpdateLog 'New executable installed; starting health check.'\n"
         "  } catch {\n"
-        "    Write-UpdateLog ('Attempt ' + ($attempt + 1) + ' failed: ' + $_.Exception.Message)\n"
-        "    if ((-not (Test-Path -LiteralPath $target)) -and (Test-Path -LiteralPath $backup)) { Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue }\n"
+        "    Write-UpdateLog ('Install attempt ' + ($attempt + 1) + ' failed: ' + $_.Exception.Message)\n"
+        "    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue }\n"
         "    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
         "    Start-Sleep -Milliseconds 500\n"
         "  }\n"
         "}\n"
-        "Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
-        "Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
-        "Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue\n"
-        "if (Test-Path -LiteralPath $target) {\n"
-        "  try { Start-Process -FilePath $target -WorkingDirectory $targetDir } catch { Write-UpdateLog ('Restart failed: ' + $_.Exception.Message) }\n"
+        "if ($installed) {\n"
+        "  try {\n"
+        "    Remove-Item -LiteralPath $healthFile -Force -ErrorAction SilentlyContinue\n"
+        "    if (Test-Path -LiteralPath $metaSrc) { Copy-Item -LiteralPath $metaSrc -Destination $pending -Force; Hide-File $pending }\n"
+        "    $proc = Start-Process -FilePath $target -WorkingDirectory $targetDir -ArgumentList @('--update-health-file', $healthFile) -PassThru\n"
+        "    for ($healthAttempt = 0; $healthAttempt -lt 360; $healthAttempt++) {\n"
+        "      if (Test-Path -LiteralPath $healthFile) { $success = $true; break }\n"
+        "      try { if ($proc.HasExited) { break } } catch {}\n"
+        "      Start-Sleep -Milliseconds 250\n"
+        "    }\n"
+        "  } catch { Write-UpdateLog ('Health-check launch failed: ' + $_.Exception.Message) }\n"
         "}\n"
-        "if (-not $success) { Write-UpdateLog 'Update failed; the previous launcher was restored when possible.' }\n"
+        "if ($success) {\n"
+        "  Write-UpdateLog 'Update health check passed.'\n"
+        "  Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
+        "} elseif ($installed) {\n"
+        "  Write-UpdateLog 'Health check failed; rolling back.'\n"
+        "  try { if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Wait-Process -Id $proc.Id -ErrorAction SilentlyContinue } } catch {}\n"
+        "  Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue\n"
+        "  Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue\n"
+        "  if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue }\n"
+        "  if (Test-Path -LiteralPath $target) { try { Start-Process -FilePath $target -WorkingDirectory $targetDir } catch { Write-UpdateLog ('Rollback restart failed: ' + $_.Exception.Message) } }\n"
+        "}\n"
+        "Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
+        "Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue\n"
+        "Remove-Item -LiteralPath $metaSrc -Force -ErrorAction SilentlyContinue\n"
+        "Remove-Item -LiteralPath $healthFile -Force -ErrorAction SilentlyContinue\n"
+        "if (-not $success -and -not $installed -and (Test-Path -LiteralPath $target)) { try { Start-Process -FilePath $target -WorkingDirectory $targetDir } catch {} }\n"
+        "if (-not $success) { Write-UpdateLog 'Update did not pass health check; previous launcher was restored when possible.' }\n"
         "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
     )
 
 
-def spawn_update_replacer(downloaded: Path, target: Path) -> None:
+def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateInfo] = None) -> None:
     downloaded = downloaded.resolve()
     target = target.resolve()
 
@@ -289,9 +333,22 @@ def spawn_update_replacer(downloaded: Path, target: Path) -> None:
         root = _prepare_update_root()
         log_path = root.parent / "update.log"
         digest = hashlib.sha256(downloaded.read_bytes()).hexdigest()
-        script = root / f".apply-{uuid.uuid4().hex}.ps1"
+        token = uuid.uuid4().hex
+        metadata = root / f".metadata-{token}.json"
+        health = root / f".health-{token}"
+        payload = {
+            "version": str(info.version if info else APP_VERSION),
+            "previous_version": APP_VERSION,
+            "tag": str(info.tag if info else ""),
+            "release_url": str(info.release_url if info else ""),
+            "notes": str(info.notes if info else "")[:12000],
+            "installed_at": int(time.time()),
+        }
+        metadata.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        _mark_hidden(metadata)
+        script = root / f".apply-{token}.ps1"
         script.write_text(
-            _build_windows_replacer_script(downloaded, target, os.getpid(), digest, log_path),
+            _build_windows_replacer_script(downloaded, target, os.getpid(), digest, log_path, metadata, health),
             encoding="utf-8-sig",
         )
         _mark_hidden(script)
@@ -331,3 +388,44 @@ for _ in range(100):
         cwd=str(target.parent),
         close_fds=True,
     )
+
+
+def clear_update_download_cache() -> None:
+    DownloadCache(_prepare_update_root() / "cache", max_entries=4, max_age_seconds=14 * 24 * 60 * 60).clear()
+
+
+def signal_update_health() -> None:
+    raw = os.environ.get("NULLLAUNCHER_UPDATE_HEALTH_FILE", "").strip()
+    if not raw:
+        return
+    path = Path(raw)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(f"{APP_VERSION}\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def consume_pending_update(current_version: str = APP_VERSION) -> Optional[dict[str, Any]]:
+    path = _update_root() / "pending-update.json"
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        return None
+    if not isinstance(payload, dict):
+        return None
+    version = _release_version(payload.get("version"))
+    if version != _release_version(current_version):
+        if _version_tuple(version) < _version_tuple(current_version):
+            with contextlib.suppress(OSError):
+                path.unlink()
+        return None
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return payload

@@ -41,7 +41,7 @@ from .utils import atomic_json_write, clean_markup, default_minecraft_dir, load_
                                                                              
 
 DEFAULT_STATE: dict[str, Any] = {
-    "schema": 4,
+    "schema": 5,
     "accounts": [],
     "selected_account": None,
     "proxy_profiles": [],
@@ -58,6 +58,7 @@ DEFAULT_STATE: dict[str, Any] = {
         "mouse_enabled": True,
         "repair_before_launch": True,
         "close_launcher_on_game_start": False,
+        "first_run_complete": False,
         "default_min_ram_mb": 1024,
         "default_max_ram_mb": recommended_ram_mb(),
         "custom_java_path": "",
@@ -83,6 +84,10 @@ class StateStore:
         raw = load_json(self.path, {})
         self.data = json.loads(json.dumps(DEFAULT_STATE))
         self._deep_merge(self.data, raw if isinstance(raw, dict) else {})
+        if isinstance(raw, dict) and raw:
+            old_settings = raw.get("settings") if isinstance(raw.get("settings"), dict) else {}
+            if "first_run_complete" not in old_settings:
+                self.data["settings"]["first_run_complete"] = True
         self._normalize()
         cache = load_json(self.cache_path, {})
         self.cache = cache if isinstance(cache, dict) else {}
@@ -97,7 +102,7 @@ class StateStore:
 
     def _normalize(self) -> None:
         d = self.data
-        d["schema"] = 4
+        d["schema"] = 5
         if not isinstance(d.get("accounts"), list):
             d["accounts"] = []
         good_accounts = []
@@ -155,7 +160,7 @@ class StateStore:
             d["settings"] = json.loads(json.dumps(DEFAULT_STATE["settings"]))
         s = d["settings"]
         s["minecraft_dir"] = str(Path(str(s.get("minecraft_dir") or default_minecraft_dir())).expanduser())
-        for key in ("show_snapshots", "show_old_versions", "news_enabled", "auto_update", "mouse_enabled", "repair_before_launch", "close_launcher_on_game_start"):
+        for key in ("show_snapshots", "show_old_versions", "news_enabled", "auto_update", "mouse_enabled", "repair_before_launch", "close_launcher_on_game_start", "first_run_complete"):
             s[key] = bool(s.get(key, DEFAULT_STATE["settings"][key]))
         s["default_min_ram_mb"] = safe_int(s.get("default_min_ram_mb"), 1024, 256, 65536)
         s["default_max_ram_mb"] = safe_int(s.get("default_max_ram_mb"), recommended_ram_mb(), 512, 131072)
@@ -178,6 +183,7 @@ class StateStore:
     def reset_launcher_settings(self) -> None:
         """Restore launcher preferences only; accounts and versions are untouched."""
         self.data["settings"] = json.loads(json.dumps(DEFAULT_STATE["settings"]))
+        self.data["settings"]["first_run_complete"] = True
         self.save()
 
     def reset_version_settings(self, installed_id: str) -> None:

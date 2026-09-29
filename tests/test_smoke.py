@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.10.5"
+    assert APP_VERSION == "1.11.0"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -139,6 +139,9 @@ def test_windows_update_helper_replaces_restarts_and_cleans_up(tmp_path):
     assert "[System.IO.File]::Replace" in script
     assert "Start-Process -FilePath $target" in script
     assert "Remove-Item -LiteralPath $src" in script
+    assert "--update-health-file" in script
+    assert "Health check failed; rolling back." in script
+    assert "Move-Item -LiteralPath $backup -Destination $target" in script
     assert "Remove-Item -LiteralPath $PSCommandPath" in script
 
 
@@ -148,3 +151,78 @@ def test_update_staging_directory_is_separate_and_overridable(tmp_path, monkeypa
     staging = tmp_path / "private-updates"
     monkeypatch.setenv("NULLLAUNCHER_UPDATE_DIR", str(staging))
     assert _update_root() == staging.resolve()
+
+
+def test_new_ux_text_exists_for_every_language():
+    from null_launcher.config import I18N, LANGUAGES
+
+    keys = {
+        "already_running", "first_run_title", "first_run_language",
+        "first_run_minecraft_dir", "first_run_ram_min", "first_run_ram_max",
+        "first_run_account", "first_run_done_title", "launching_title",
+        "launch_stage_verify", "launcher_crash_title", "game_crash_title",
+        "clear_download_cache", "whats_new_title", "whats_new_continue",
+    }
+    for language in LANGUAGES:
+        assert keys <= I18N[language].keys()
+
+
+def test_existing_state_does_not_trigger_first_run(tmp_path):
+    import json
+    from null_launcher.state import StateStore
+
+    old = {
+        "schema": 4,
+        "accounts": [{"name": "Steve", "uuid": "ignored", "type": "offline"}],
+        "settings": {"language": "en"},
+    }
+    (tmp_path / "state.json").write_text(json.dumps(old), encoding="utf-8")
+    store = StateStore(tmp_path)
+    assert store.settings["first_run_complete"] is True
+
+
+def test_fresh_state_requests_first_run(tmp_path):
+    from null_launcher.state import StateStore
+
+    store = StateStore(tmp_path)
+    assert store.settings["first_run_complete"] is False
+
+
+def test_download_cache_roundtrip_and_clear(tmp_path):
+    from null_launcher.download_cache import DownloadCache
+
+    cache = DownloadCache(tmp_path / "downloads")
+    calls = []
+    data1 = cache.fetch("https://example.invalid/file.bin", lambda: calls.append(1) or b"abc")
+    data2 = cache.fetch("https://example.invalid/file.bin", lambda: calls.append(2) or b"def")
+    assert data1 == b"abc"
+    assert data2 == b"abc"
+    assert calls == [1]
+    cache.clear()
+    assert cache.get("https://example.invalid/file.bin") is None
+
+
+def test_update_info_keeps_release_notes():
+    from null_launcher.updater import UpdateInfo
+
+    info = UpdateInfo(
+        version="9.9.9",
+        tag="v9.9.9",
+        release_url="https://example.invalid/release",
+        download_url="https://example.invalid/NullLauncher.exe",
+        notes="Added safer updates",
+    )
+    assert "safer updates" in info.notes
+
+
+def test_single_instance_guard_blocks_second_instance():
+    from null_launcher.instance import SingleInstanceGuard
+
+    first = SingleInstanceGuard("NullLauncher-test-guard")
+    second = SingleInstanceGuard("NullLauncher-test-guard")
+    assert first.acquire() is True
+    try:
+        assert second.acquire() is False
+    finally:
+        first.release()
+        second.release()
