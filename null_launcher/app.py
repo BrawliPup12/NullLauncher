@@ -65,9 +65,11 @@ class NullLauncher:
 
         tagline = random.choice(SPLASH_LINES.get(cfg.CURRENT_LANGUAGE, SPLASH_LINES["en"]))
         state = {"text": tr("preparing"), "value": 0, "max": 5}
+        skip_auto_update = os.environ.pop("NULLLAUNCHER_SKIP_AUTO_UPDATE", "").strip().lower() in {"1", "true", "yes", "on"}
+        auto_update_enabled = bool(self.store.settings.get("auto_update", True)) and not skip_auto_update
         update_state: dict[str, Any] = {
-            "active": bool(self.store.settings.get("auto_update", True)),
-            "text": tr("checking_updates") if self.store.settings.get("auto_update", True) else "",
+            "active": auto_update_enabled,
+            "text": tr("checking_updates") if auto_update_enabled else "",
             "ready": None,
         }
         state_lock = threading.Lock()
@@ -84,7 +86,7 @@ class NullLauncher:
                 errors.append(exc)
 
         def update_worker() -> None:
-            if not self.store.settings.get("auto_update", True):
+            if not auto_update_enabled:
                 return
             try:
                 info = check_github_update()
@@ -144,7 +146,7 @@ class NullLauncher:
         preload_thread = threading.Thread(target=preload_worker, name="NullPreloadUI", daemon=False)
         preload_thread.start()
         update_thread: Optional[threading.Thread] = None
-        if self.store.settings.get("auto_update", True):
+        if auto_update_enabled:
             update_thread = threading.Thread(target=update_worker, name="NullUpdate", daemon=False)
             update_thread.start()
 
@@ -353,7 +355,7 @@ class NullLauncher:
         """Check GitHub Releases on demand; install a newer release immediately."""
         def worker(callbacks: dict[str, Callable]) -> Any:
             callbacks["setStatus"](tr("checking_updates"))
-            info = check_github_update(timeout=7.0)
+            info = check_github_update(timeout=7.0, allow_failed_retry=True)
             if info is None:
                 return None
             callbacks["setStatus"](tr("update_downloading", version=info.version))

@@ -113,6 +113,52 @@ class Terminal:
         if not self._win or self._window_icon_handles:
             return
         try:
+            kernel32 = ctypes.windll.kernel32
+            user32 = ctypes.windll.user32
+            shell32 = ctypes.windll.shell32
+
+            # Give the launcher a stable Windows application identity. This helps
+            # classic console/taskbar grouping use the launcher instead of Python.
+            with contextlib.suppress(Exception):
+                shell32.SetCurrentProcessExplicitAppUserModelID.argtypes = [ctypes.c_wchar_p]
+                shell32.SetCurrentProcessExplicitAppUserModelID.restype = ctypes.c_long
+                shell32.SetCurrentProcessExplicitAppUserModelID("BrawliPup12.NullLauncher")
+
+            # Explorer caches icons by executable path. Refresh the shell after a
+            # rebuilt/updated EXE replaces the previous file at the same path.
+            with contextlib.suppress(Exception):
+                shell32.SHChangeNotify.restype = None
+                shell32.SHChangeNotify(0x08000000, 0x0000, None, None)
+
+            kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+            hwnd = kernel32.GetConsoleWindow()
+            if not hwnd:
+                return
+
+            user32.SendMessageW.restype = ctypes.c_ssize_t
+            user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+
+            large = ctypes.c_void_p()
+            small = ctypes.c_void_p()
+            extracted = 0
+            if getattr(sys, "frozen", False):
+                shell32.ExtractIconExW.argtypes = [
+                    ctypes.c_wchar_p, ctypes.c_int,
+                    ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.c_uint,
+                ]
+                shell32.ExtractIconExW.restype = ctypes.c_uint
+                extracted = int(shell32.ExtractIconExW(str(Path(sys.executable).resolve()), 0, ctypes.byref(large), ctypes.byref(small), 1))
+
+            if extracted > 0:
+                if large.value:
+                    user32.SendMessageW(hwnd, 0x0080, 1, int(large.value))
+                    self._window_icon_handles.append(int(large.value))
+                if small.value:
+                    user32.SendMessageW(hwnd, 0x0080, 0, int(small.value))
+                    self._window_icon_handles.append(int(small.value))
+                return
+
+            # Source/dev fallback: load the same ICO that is embedded by PyInstaller.
             roots = []
             bundle_root = getattr(sys, "_MEIPASS", "")
             if bundle_root:
@@ -121,16 +167,8 @@ class Terminal:
             icon_path = next((root / "assets" / "NullLauncher.ico" for root in roots if (root / "assets" / "NullLauncher.ico").is_file()), None)
             if icon_path is None:
                 return
-            kernel32 = ctypes.windll.kernel32
-            user32 = ctypes.windll.user32
-            kernel32.GetConsoleWindow.restype = ctypes.c_void_p
-            hwnd = kernel32.GetConsoleWindow()
-            if not hwnd:
-                return
             user32.LoadImageW.restype = ctypes.c_void_p
             user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
-            user32.SendMessageW.restype = ctypes.c_ssize_t
-            user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
             for kind, size in ((1, 32), (0, 16)):
                 handle = user32.LoadImageW(None, str(icon_path), 1, size, size, 0x0010)
                 if handle:

@@ -106,7 +106,7 @@ def cleanup_update_artifacts(*, max_age_seconds: int = 48 * 60 * 60) -> None:
         return
     now = time.time()
     for path in root.iterdir():
-        if path.name in {"pending-update.json", "cache"}:
+        if path.name in {"pending-update.json", "failed-update.json", "cache"}:
             continue
         if path.name == "update.log":
             continue
@@ -118,7 +118,74 @@ def cleanup_update_artifacts(*, max_age_seconds: int = 48 * 60 * 60) -> None:
     DownloadCache(root / "cache", max_entries=4, max_age_seconds=14 * 24 * 60 * 60).cleanup()
 
 
-def check_github_update(timeout: float = 4.5) -> Optional[UpdateInfo]:
+FAILED_UPDATE_RETRY_SECONDS = 24 * 60 * 60
+
+
+def _failed_update_path() -> Path:
+    return _update_root() / "failed-update.json"
+
+
+def _read_failed_update() -> Optional[dict[str, Any]]:
+    path = _failed_update_path()
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        with contextlib.suppress(OSError):
+            path.unlink()
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _record_failed_update(version: str, reason: str, digest: str = "") -> None:
+    root = _prepare_update_root()
+    path = root / "failed-update.json"
+    payload = {
+        "version": _release_version(version),
+        "digest": str(digest or "").strip().lower(),
+        "reason": str(reason or "")[:1000],
+        "failed_at": int(time.time()),
+    }
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+        _mark_hidden(path)
+    except OSError:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+
+
+def _clear_failed_update(version: str = "") -> None:
+    path = _failed_update_path()
+    if not path.exists():
+        return
+    if version:
+        payload = _read_failed_update()
+        if payload is not None and _release_version(payload.get("version")) != _release_version(version):
+            return
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
+def _recent_failed_update(version: str, *, max_age_seconds: int = FAILED_UPDATE_RETRY_SECONDS) -> bool:
+    payload = _read_failed_update()
+    if not payload or _release_version(payload.get("version")) != _release_version(version):
+        return False
+    try:
+        failed_at = int(payload.get("failed_at") or 0)
+    except (TypeError, ValueError):
+        return False
+    if failed_at <= 0:
+        return False
+    if time.time() - failed_at < max(60, int(max_age_seconds)):
+        return True
+    _clear_failed_update(version)
+    return False
+
+
+def check_github_update(timeout: float = 4.5, *, allow_failed_retry: bool = False) -> Optional[UpdateInfo]:
     if not getattr(sys, "frozen", False):
         return None
 
@@ -137,6 +204,8 @@ def check_github_update(timeout: float = 4.5) -> Optional[UpdateInfo]:
     tag = clean_markup(payload.get("tag_name"))
     version = _release_version(tag or payload.get("name"))
     if not version or not _is_newer_version(version):
+        return None
+    if not allow_failed_retry and _recent_failed_update(version):
         return None
 
     assets = payload.get("assets") if isinstance(payload.get("assets"), list) else []
@@ -307,6 +376,13 @@ def schedule_cleanup_path(path: str | Path) -> None:
     threading.Thread(target=worker, name="NullUpdateCleanup", daemon=True).start()
 
 
+def _independent_frozen_env() -> dict[str, str]:
+    env = dict(os.environ)
+    if getattr(sys, "frozen", False):
+        env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def _launch_visible_launcher(target: Path, extra_args: Optional[list[str]] = None) -> subprocess.Popen[Any]:
     args = [str(target)] + list(extra_args or [])
     flags = 0
@@ -319,6 +395,7 @@ def _launch_visible_launcher(target: Path, extra_args: Optional[list[str]] = Non
         stdin=subprocess.DEVNULL,
         creationflags=flags,
         close_fds=True,
+        env=_independent_frozen_env(),
     )
 
 
@@ -355,31 +432,74 @@ def _install_downloaded_executable(source: Path, target: Path, expected_hash: st
         raise
 
 
+def _read_update_version_from_metadata(metadata: Optional[Path]) -> str:
+    if metadata is None or not metadata.exists():
+        return ""
+    try:
+        payload = json.loads(metadata.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return _release_version(payload.get("version"))
+
+
 def run_update_helper(
     target: str | Path,
     wait_pid: int,
     expected_hash: str,
+    update_source: str | Path = "",
     metadata_path: str | Path = "",
     log_path: str | Path = "",
 ) -> int:
-    source = Path(sys.executable).resolve()
+    helper = Path(sys.executable).resolve()
+    source = Path(update_source).expanduser().resolve() if str(update_source) else helper
     target_path = Path(target).expanduser().resolve()
-    root = source.parent
+    root = helper.parent
     log = Path(log_path).expanduser() if str(log_path) else (root.parent / "update.log")
     metadata = Path(metadata_path).expanduser() if str(metadata_path) else None
     pending = root / "pending-update.json"
     health = root / f".health-{uuid.uuid4().hex}"
     expected = str(expected_hash or "").strip().lower()
+    update_version = _read_update_version_from_metadata(metadata)
 
-    _append_update_log(log, f"Python updater helper started from {source}.")
-    if not expected or _sha256_path(source) != expected:
-        _append_update_log(log, "Updater helper hash mismatch; refusing to install.")
-        _schedule_delete_on_reboot(source)
+    _append_update_log(log, f"Updater helper started from {helper}; payload is {source}.")
+    if not source.is_file():
+        reason = f"Update payload is missing: {source}"
+        _append_update_log(log, reason)
+        if update_version:
+            _record_failed_update(update_version, reason, expected)
+        _schedule_delete_on_reboot(helper)
+        return 2
+    try:
+        source_hash = _sha256_path(source)
+    except OSError as exc:
+        reason = f"Could not read update payload: {type(exc).__name__}: {exc}"
+        _append_update_log(log, reason)
+        if update_version:
+            _record_failed_update(update_version, reason, expected)
+        _schedule_delete_on_reboot(helper)
+        return 2
+    if not expected or source_hash != expected:
+        reason = "Updater payload hash mismatch; refusing to install."
+        _append_update_log(log, reason)
+        if update_version:
+            _record_failed_update(update_version, reason, expected)
+        if source != helper:
+            with contextlib.suppress(OSError):
+                source.unlink()
+        _schedule_delete_on_reboot(helper)
         return 2
 
     if not _wait_for_pid_exit(int(wait_pid), 120.0):
-        _append_update_log(log, f"Timed out waiting for launcher PID {wait_pid} to exit.")
-        _schedule_delete_on_reboot(source)
+        reason = f"Timed out waiting for launcher PID {wait_pid} to exit."
+        _append_update_log(log, reason)
+        if update_version:
+            _record_failed_update(update_version, reason, expected)
+        if source != helper:
+            with contextlib.suppress(OSError):
+                source.unlink()
+        _schedule_delete_on_reboot(helper)
         return 3
     _append_update_log(log, "Previous launcher process exited.")
 
@@ -398,12 +518,22 @@ def run_update_helper(
             time.sleep(0.25)
 
     if not installed:
-        _append_update_log(log, f"Update installation failed: {last_error or 'unknown error'}")
+        reason = f"Update installation failed: {last_error or 'unknown error'}"
+        _append_update_log(log, reason)
+        if update_version:
+            _record_failed_update(update_version, reason, expected)
         if target_path.exists():
             with contextlib.suppress(Exception):
                 _launch_visible_launcher(target_path)
-        _schedule_delete_on_reboot(source)
+        if source != helper:
+            with contextlib.suppress(OSError):
+                source.unlink()
+        _schedule_delete_on_reboot(helper)
         return 4
+
+    if source != helper:
+        with contextlib.suppress(OSError):
+            source.unlink()
 
     with contextlib.suppress(OSError):
         health.unlink()
@@ -419,7 +549,7 @@ def run_update_helper(
     try:
         proc = _launch_visible_launcher(
             target_path,
-            ["--update-health-file", str(health), "--cleanup-update-helper", str(source)],
+            ["--update-health-file", str(health), "--cleanup-update-helper", str(helper), "--skip-update-once"],
         )
         _append_update_log(log, f"Started updated launcher PID {proc.pid}; waiting for health signal.")
     except Exception as exc:
@@ -438,6 +568,8 @@ def run_update_helper(
 
     if healthy:
         _append_update_log(log, "Update health check passed.")
+        if update_version:
+            _clear_failed_update(update_version)
         if backup is not None:
             with contextlib.suppress(OSError):
                 backup.unlink()
@@ -446,10 +578,13 @@ def run_update_helper(
                 metadata.unlink()
         with contextlib.suppress(OSError):
             health.unlink()
-        _schedule_delete_on_reboot(source)
+        _schedule_delete_on_reboot(helper)
         return 0
 
-    _append_update_log(log, "Updated launcher did not pass health check; rolling back.")
+    reason = "Updated launcher did not pass health check; rolling back."
+    _append_update_log(log, reason)
+    if update_version:
+        _record_failed_update(update_version, reason, expected)
     if proc is not None and proc.poll() is None:
         with contextlib.suppress(Exception):
             proc.terminate()
@@ -477,12 +612,20 @@ def run_update_helper(
 
     if target_path.exists():
         try:
-            _launch_visible_launcher(target_path)
-            _append_update_log(log, "Previous launcher restarted after rollback.")
+            _launch_visible_launcher(target_path, ["--skip-update-once"])
+            _append_update_log(log, "Previous launcher restarted after rollback with one automatic retry suppressed.")
         except Exception as exc:
             _append_update_log(log, f"Rollback restart failed: {type(exc).__name__}: {exc}")
-    _schedule_delete_on_reboot(source)
+    _schedule_delete_on_reboot(helper)
     return 5
+
+
+def _copy_running_helper(target: Path, root: Path) -> Path:
+    token = uuid.uuid4().hex
+    helper = root / f".{APP_NAME}-updater-{token}.exe"
+    shutil.copy2(target, helper)
+    _mark_hidden(helper)
+    return helper
 
 
 def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateInfo] = None) -> None:
@@ -506,17 +649,20 @@ def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateI
         metadata.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         _mark_hidden(metadata)
 
-        _append_update_log(log_path, f"Launching {downloaded.name} as updater helper for {target}.")
-        args = [
-            str(downloaded),
-            "--apply-update", str(target),
-            "--wait-pid", str(os.getpid()),
-            "--expected-sha256", digest,
-            "--update-metadata", str(metadata),
-            "--update-log", str(log_path),
-        ]
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        helper: Optional[Path] = None
         try:
+            helper = _copy_running_helper(target, root)
+            _append_update_log(log_path, f"Launching trusted updater helper {helper.name} for {target}; payload is {downloaded.name}.")
+            args = [
+                str(helper),
+                "--apply-update", str(target),
+                "--update-source", str(downloaded),
+                "--wait-pid", str(os.getpid()),
+                "--expected-sha256", digest,
+                "--update-metadata", str(metadata),
+                "--update-log", str(log_path),
+            ]
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
             with log_path.open("ab") as stream:
                 proc = subprocess.Popen(
                     args,
@@ -526,10 +672,16 @@ def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateI
                     stderr=subprocess.STDOUT,
                     creationflags=flags,
                     close_fds=True,
+                    env=_independent_frozen_env(),
                 )
             _append_update_log(log_path, f"Updater helper process created with PID {proc.pid}.")
         except Exception as exc:
             _append_update_log(log_path, f"Failed to start updater helper: {type(exc).__name__}: {exc}")
+            with contextlib.suppress(OSError):
+                metadata.unlink()
+            if helper is not None:
+                with contextlib.suppress(OSError):
+                    helper.unlink()
             raise
         return
 
@@ -548,7 +700,6 @@ for _ in range(100):
         cwd=str(target.parent),
         close_fds=True,
     )
-
 
 def clear_update_download_cache() -> None:
     DownloadCache(_prepare_update_root() / "cache", max_entries=4, max_age_seconds=14 * 24 * 60 * 60).clear()

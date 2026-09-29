@@ -11,6 +11,7 @@ $Python = Join-Path $Root ".venv\Scripts\python.exe"
 & $Python -m pip install -r requirements-dev.txt
 & $Python scripts\sync_version_info.py
 & $Python -m PyInstaller --clean --noconfirm NullLauncher.spec
+& $Python scripts\verify_windows_build.py dist\NullLauncher.exe
 
 Write-Host ""
 Write-Host "Build complete: $Root\dist\NullLauncher.exe"

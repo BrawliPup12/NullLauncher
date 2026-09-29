@@ -28,6 +28,13 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Verify release tag matches launcher version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $version = python -c "from null_launcher.config import APP_VERSION; print(APP_VERSION)"
+          if ("v$version" -ne "${{ github.ref_name }}") { throw "Tag ${{ github.ref_name }} does not match APP_VERSION $version" }
+
       - name: Sync Windows metadata
         shell: pwsh
         run: python scripts/sync_version_info.py
@@ -35,6 +42,10 @@ jobs:
       - name: Build NullLauncher.exe
         shell: pwsh
         run: python -m PyInstaller --clean --noconfirm NullLauncher.spec
+
+      - name: Verify Windows resources
+        shell: pwsh
+        run: python scripts/verify_windows_build.py dist\NullLauncher.exe
 
       - name: Smoke test
         shell: pwsh

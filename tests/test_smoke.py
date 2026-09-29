@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.2"
+    assert APP_VERSION == "1.11.3"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -143,13 +143,16 @@ def test_update_installer_replaces_target_and_keeps_backup(tmp_path):
     assert not staged.exists()
 
 
-def test_windows_updater_uses_downloaded_exe_as_helper():
+def test_windows_updater_uses_trusted_copy_as_helper():
     import inspect
     from null_launcher import updater
 
     source = inspect.getsource(updater.spawn_update_replacer)
+    assert "_copy_running_helper" in source
+    assert "--update-source" in source
     assert "--apply-update" in source
     assert "CREATE_NO_WINDOW" in source
+    assert "_independent_frozen_env" in source
     assert "powershell" not in source.lower()
 
 
@@ -170,12 +173,14 @@ def test_cli_accepts_internal_update_helper_arguments():
         "--apply-update", "C:/Apps/NullLauncher.exe",
         "--wait-pid", "123",
         "--expected-sha256", "ab" * 32,
+        "--update-source", "C:/Temp/new.exe",
         "--update-metadata", "C:/Temp/meta.json",
         "--update-log", "C:/Temp/update.log",
     ])
     assert args.apply_update.endswith("NullLauncher.exe")
     assert args.wait_pid == 123
     assert args.expected_sha256 == "ab" * 32
+    assert args.update_source.endswith("new.exe")
 
 
 def test_update_staging_directory_is_separate_and_overridable(tmp_path, monkeypatch):
@@ -317,13 +322,15 @@ def test_windows_build_has_icon_and_version_metadata():
     spec = (root / "NullLauncher.spec").read_text(encoding="utf-8")
     version_info = (root / "assets" / "version_info.txt").read_text(encoding="utf-8")
     assert (root / "assets" / "NullLauncher.ico").is_file()
-    assert 'icon="assets/NullLauncher.ico"' in spec
-    assert 'version="assets/version_info.txt"' in spec
+    assert 'ICON = ROOT / "assets" / "NullLauncher.ico"' in spec
+    assert 'VERSION_INFO = ROOT / "assets" / "version_info.txt"' in spec
+    assert 'icon=str(ICON)' in spec
+    assert 'version=str(VERSION_INFO)' in spec
     assert "StringStruct('ProductName', 'NullLauncher')" in version_info
     assert "StringStruct('FileDescription', 'Terminal Minecraft Launcher')" in version_info
     assert "StringStruct('CompanyName', 'BrawliPup12')" in version_info
-    assert "StringStruct('FileVersion', '1.11.2.0')" in version_info
-    assert "StringStruct('ProductVersion', '1.11.2.0')" in version_info
+    assert "StringStruct('FileVersion', '1.11.3.0')" in version_info
+    assert "StringStruct('ProductVersion', '1.11.3.0')" in version_info
 
 
 def test_console_window_icon_is_applied_on_windows():
@@ -335,3 +342,53 @@ def test_console_window_icon_is_applied_on_windows():
     assert "LoadImageW" in source
     assert "SendMessageW" in source
     assert "NullLauncher.ico" in source
+
+
+def test_failed_update_marker_prevents_immediate_auto_retry(tmp_path, monkeypatch):
+    from null_launcher import updater
+
+    monkeypatch.setenv("NULLLAUNCHER_UPDATE_DIR", str(tmp_path / "updates"))
+    updater._record_failed_update("9.9.9", "health check failed", "ab" * 32)
+    assert updater._recent_failed_update("9.9.9") is True
+    assert updater._recent_failed_update("9.9.8") is False
+    updater._clear_failed_update("9.9.9")
+    assert updater._recent_failed_update("9.9.9") is False
+
+
+def test_post_update_launch_can_skip_one_auto_update(monkeypatch, tmp_path):
+    from null_launcher.cli import parse_args
+
+    args = parse_args(["--skip-update-once"])
+    assert args.skip_update_once is True
+
+
+def test_build_pipeline_verifies_custom_icon_resource():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    build = (root / "scripts" / "build.ps1").read_text(encoding="utf-8")
+    workflow = (root / ".github" / "workflows" / "build-windows.yml").read_text(encoding="utf-8")
+    verifier = (root / "scripts" / "verify_windows_build.py").read_text(encoding="utf-8")
+    assert "verify_windows_build.py" in build
+    assert "verify_windows_build.py" in workflow
+    assert "Verify release tag matches launcher version" in workflow
+    assert "EXE icon does not match assets/NullLauncher.ico" in verifier
+
+
+def test_console_icon_prefers_embedded_executable_icon():
+    import inspect
+    from null_launcher.terminal import Terminal
+
+    source = inspect.getsource(Terminal._apply_window_icon)
+    assert "ExtractIconExW" in source
+    assert "SetCurrentProcessExplicitAppUserModelID" in source
+    assert "SHChangeNotify" in source
+
+
+def test_frozen_restarts_reset_pyinstaller_environment():
+    import inspect
+    from null_launcher import updater
+
+    source = inspect.getsource(updater._independent_frozen_env)
+    assert "PYINSTALLER_RESET_ENVIRONMENT" in source
+    assert inspect.getsource(updater._launch_visible_launcher).count("_independent_frozen_env") == 1

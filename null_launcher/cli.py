@@ -54,8 +54,10 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     p.add_argument("--apply-update", default="", help=argparse.SUPPRESS)
     p.add_argument("--wait-pid", type=int, default=0, help=argparse.SUPPRESS)
     p.add_argument("--expected-sha256", default="", help=argparse.SUPPRESS)
+    p.add_argument("--update-source", default="", help=argparse.SUPPRESS)
     p.add_argument("--update-metadata", default="", help=argparse.SUPPRESS)
     p.add_argument("--update-log", default="", help=argparse.SUPPRESS)
+    p.add_argument("--skip-update-once", action="store_true", help=argparse.SUPPRESS)
     return p.parse_args(argv)
 
 
@@ -66,6 +68,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.apply_update,
             args.wait_pid,
             args.expected_sha256,
+            args.update_source,
             args.update_metadata,
             args.update_log,
         )
@@ -86,6 +89,8 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     if args.update_health_file:
         os.environ["NULLLAUNCHER_UPDATE_HEALTH_FILE"] = str(args.update_health_file)
+    if args.skip_update_once:
+        os.environ["NULLLAUNCHER_SKIP_AUTO_UPDATE"] = "1"
     if args.cleanup_update_helper:
         schedule_cleanup_path(args.cleanup_update_helper)
 
