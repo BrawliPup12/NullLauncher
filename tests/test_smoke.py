@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.6"
+    assert APP_VERSION == "1.11.7"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -402,7 +402,7 @@ def test_project_metadata_matches_app_version():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "1.11.6"' in pyproject
+    assert 'version = "1.11.7"' in pyproject
 
 
 def test_windows_build_uses_native_windowed_frontend():
