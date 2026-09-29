@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.5"
+    assert APP_VERSION == "1.11.6"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -329,8 +329,8 @@ def test_windows_build_has_icon_and_version_metadata():
     assert "StringStruct('ProductName', 'NullLauncher')" in version_info
     assert "StringStruct('FileDescription', 'Terminal Minecraft Launcher')" in version_info
     assert "StringStruct('CompanyName', 'BrawliPup12')" in version_info
-    assert "StringStruct('FileVersion', '1.11.5.0')" in version_info
-    assert "StringStruct('ProductVersion', '1.11.5.0')" in version_info
+    assert "StringStruct('FileVersion', '1.11.6.0')" in version_info
+    assert "StringStruct('ProductVersion', '1.11.6.0')" in version_info
 
 
 def test_console_window_icon_is_applied_on_windows():
@@ -398,7 +398,7 @@ def test_project_metadata_matches_app_version():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "1.11.5"' in pyproject
+    assert 'version = "1.11.6"' in pyproject
 
 
 def test_windows_build_uses_native_windowed_frontend():
@@ -463,3 +463,32 @@ def test_minecraft_launch_hides_java_console_on_windows():
     source = inspect.getsource(NullLauncher.play)
     assert "CREATE_NO_WINDOW" in source
     assert "CREATE_NEW_PROCESS_GROUP" in source
+
+
+def test_windowed_news_images_keep_terminal_filter():
+    import inspect
+    from null_launcher.window_terminal import WindowTerminal
+
+    source = inspect.getsource(WindowTerminal.draw_sixel)
+    assert "_cmd_filter_image" in source
+    assert "cfg.NEWS_FILTER_RGB" in source
+
+
+def test_windowed_hover_does_not_delete_graphic_layer():
+    import inspect
+    from null_launcher.window_terminal import WindowTerminal
+
+    source = inspect.getsource(WindowTerminal.render)
+    assert 'self.canvas.delete("text")' in source
+    assert 'tags=("text",)' in source
+    draw_source = inspect.getsource(WindowTerminal.draw_sixel)
+    assert 'self.canvas.delete("graphic")' in draw_source
+    assert 'tags=("graphic",)' in draw_source
+
+
+def test_windowed_backend_exposes_sixel_cache_alias():
+    import inspect
+    from null_launcher.window_terminal import WindowTerminal
+
+    source = inspect.getsource(WindowTerminal.__init__)
+    assert "self._sixel_cache = self._image_cache" in source

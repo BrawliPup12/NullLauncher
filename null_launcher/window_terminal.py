@@ -13,7 +13,7 @@ from typing import Any, Optional
 from . import config as cfg
 from .config import ANSI_RE, APP_NAME, APP_VERSION
 from .terminal import InputEvent
-from .utils import _sixel_geometry
+from .utils import _cmd_filter_image, _sixel_geometry
 
 
 _ANSI_TOKEN_RE = re.compile(r"\x1b\[([0-9;]*)m")
@@ -49,9 +49,14 @@ class WindowTerminal:
         self._last_frame: list[str] = []
         self._last_size: Optional[tuple[int, int]] = None
         self._view_key = ""
+        self._rendered_view_key = ""
         self._last_graphic_key: Optional[tuple[Any, ...]] = None
         self._photo_refs: list[Any] = []
         self._image_cache: dict[tuple[Any, ...], Any] = {}
+        # App settings/cache code expects the terminal backend to expose the
+        # same cache name as the SIXEL console backend.  Alias it so changing
+        # the news filter invalidates GUI previews too.
+        self._sixel_cache = self._image_cache
 
         self._set_app_id()
         self.root = tk.Tk(className=APP_NAME)
@@ -192,6 +197,7 @@ class WindowTerminal:
             return
         self._last_frame = []
         self._last_size = None
+        self._rendered_view_key = ""
         self._last_graphic_key = None
         self._photo_refs.clear()
         with contextlib.suppress(Exception):
@@ -264,10 +270,24 @@ class WindowTerminal:
         if len(frame) < rows:
             frame.extend([""] * (rows - len(frame)))
         current_size = (cols, rows)
-        full_redraw = bool(animate or not self._last_frame or self._last_size != current_size)
+        view_changed = self._view_key != self._rendered_view_key
+        full_redraw = bool(
+            animate
+            or not self._last_frame
+            or self._last_size != current_size
+            or view_changed
+        )
 
-        self.canvas.delete("all")
-        self._photo_refs.clear()
+        # Keep the raster layer alive during ordinary hover/selection updates.
+        # Deleting the whole canvas here made news images disappear for a frame
+        # on every mouse move, which looked like aggressive flickering.
+        if full_redraw:
+            self.canvas.delete("all")
+            self._photo_refs.clear()
+            self._last_graphic_key = None
+        else:
+            self.canvas.delete("text")
+
         pad_x = max(0, (int(self.canvas.winfo_width()) - cols * self._char_w) // 2)
         for row, line in enumerate(frame):
             x = pad_x
@@ -277,7 +297,9 @@ class WindowTerminal:
                     continue
                 fill = self._dim_color(color) if dim else color
                 font = self.font_bold if bold else self.font
-                self.canvas.create_text(x, y, text=text, anchor="nw", fill=fill, font=font)
+                self.canvas.create_text(
+                    x, y, text=text, anchor="nw", fill=fill, font=font, tags=("text",)
+                )
                 x += int(font.measure(text))
             if animate and line:
                 self._pump()
@@ -285,7 +307,7 @@ class WindowTerminal:
 
         self._last_frame = frame
         self._last_size = current_size
-        self._last_graphic_key = None if full_redraw else self._last_graphic_key
+        self._rendered_view_key = self._view_key
         self._pump()
         return full_redraw
 
@@ -332,21 +354,34 @@ class WindowTerminal:
             cols, rows = self.sixel_geometry(image, max_columns, max_rows)
             target_w = max(1, cols * self._char_w)
             target_h = max(1, rows * self._line_h)
-            key = (graphic_key, id(image), target_w, target_h)
+            draw_key = (
+                graphic_key,
+                int(top_row),
+                target_w,
+                target_h,
+                cfg.NEWS_FILTER_RGB,
+            )
+            if not force and draw_key == self._last_graphic_key:
+                return True
+
+            key = (graphic_key, id(image), target_w, target_h, cfg.NEWS_FILTER_RGB)
             photo = self._image_cache.get(key)
             if photo is None:
-                converted = image.convert("RGB") if getattr(image, "mode", "RGB") != "RGB" else image
-                resized = converted.copy()
-                resized.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
-                photo = ImageTk.PhotoImage(resized, master=self.root)
+                # Use the same terminal-style tint/contrast/scanline filter as
+                # the SIXEL backend instead of displaying the raw article RGB.
+                styled = _cmd_filter_image(image, target_w, target_h)
+                photo = ImageTk.PhotoImage(styled, master=self.root)
                 if len(self._image_cache) > 20:
                     self._image_cache.clear()
                 self._image_cache[key] = photo
+
             x = max(0, (int(self.canvas.winfo_width()) - int(photo.width())) // 2)
             y = max(0, (int(top_row) - 1) * self._line_h)
-            self.canvas.create_image(x, y, image=photo, anchor="nw")
+            self.canvas.delete("graphic")
+            self._photo_refs.clear()
+            self.canvas.create_image(x, y, image=photo, anchor="nw", tags=("graphic",))
             self._photo_refs.append(photo)
-            self._last_graphic_key = (graphic_key, int(top_row), target_w, target_h)
+            self._last_graphic_key = draw_key
             self._pump()
             return True
         except Exception:

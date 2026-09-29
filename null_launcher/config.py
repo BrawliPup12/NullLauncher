@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Iterable, Optional
 
 APP_NAME = "NullLauncher"
-APP_VERSION = "1.11.5"
+APP_VERSION = "1.11.6"
 REQUIRED_MLL = "8.0"
 REQUIRED_PILLOW = "10.0"
 MIN_PYTHON = (3, 10)
