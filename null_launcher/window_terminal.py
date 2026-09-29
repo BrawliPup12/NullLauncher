@@ -40,6 +40,11 @@ class WindowTerminal:
         self.mouse_enabled = mouse_enabled
         self._tk = tk
         self._events: "queue.Queue[InputEvent]" = queue.Queue()
+        # Tk can emit hundreds of <Motion> events while the pointer crosses a menu.
+        # Keep only the newest position so hover selection jumps directly to the
+        # item under the cursor instead of replaying every intermediate row.
+        self._latest_motion: Optional[InputEvent] = None
+        self._motion_pending = False
         self._closed = False
         self._last_frame: list[str] = []
         self._last_size: Optional[tuple[int, int]] = None
@@ -147,7 +152,12 @@ class WindowTerminal:
         return max(0, int(event.y) // max(1, self._line_h))
 
     def _on_motion(self, event: Any) -> None:
-        self._events.put(InputEvent("mouse", "move", self._event_col(event), self._event_row(event)))
+        self._latest_motion = InputEvent("mouse", "move", self._event_col(event), self._event_row(event))
+        if not self._motion_pending:
+            self._motion_pending = True
+            # Coordinates are resolved when the event is consumed; this marker
+            # merely preserves ordering relative to clicks/wheel/key events.
+            self._events.put(InputEvent("mouse", "move"))
 
     def _on_click(self, event: Any) -> None:
         self.canvas.focus_set()
@@ -291,13 +301,18 @@ class WindowTerminal:
         return 1.0
 
     def sixel_geometry(self, image: Any, cell_columns: int, cell_rows: int) -> tuple[int, int]:
-        return _sixel_geometry(
+        # _sixel_geometry returns encoded pixel width/height followed by the
+        # occupied terminal columns/rows.  The menu API expects only the latter.
+        # v1.11.4 accidentally returned all four values, so article_graphic()
+        # failed to unpack them and news covers silently disappeared.
+        _, _, occupied_columns, occupied_rows = _sixel_geometry(
             image,
             max(1, int(cell_columns)),
             max(1, int(cell_rows)),
             self.cell_pixel_size(),
             1.0,
         )
+        return occupied_columns, occupied_rows
 
     def draw_sixel(
         self,
@@ -390,6 +405,13 @@ class WindowTerminal:
                 continue
             if event.kind == "close":
                 raise KeyboardInterrupt
+            if event.kind == "mouse" and event.key == "move":
+                latest = self._latest_motion
+                self._latest_motion = None
+                self._motion_pending = False
+                if latest is not None:
+                    return latest
+                continue
             return event
 
     def show_fatal(self, title: str, message: str) -> None:

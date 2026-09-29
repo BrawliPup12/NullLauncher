@@ -16,11 +16,11 @@ VSVersionInfo(
         [
           StringStruct('CompanyName', 'BrawliPup12'),
           StringStruct('FileDescription', 'Terminal Minecraft Launcher'),
-          StringStruct('FileVersion', '1.11.4.0'),
+          StringStruct('FileVersion', '1.11.5.0'),
           StringStruct('InternalName', 'NullLauncher'),
           StringStruct('OriginalFilename', 'NullLauncher.exe'),
           StringStruct('ProductName', 'NullLauncher'),
-          StringStruct('ProductVersion', '1.11.4.0'),
+          StringStruct('ProductVersion', '1.11.5.0'),
           StringStruct('LegalCopyright', 'Copyright (C) 2026 BrawliPup12')
         ]
       )

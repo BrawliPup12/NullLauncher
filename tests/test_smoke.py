@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.4"
+    assert APP_VERSION == "1.11.5"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -329,8 +329,8 @@ def test_windows_build_has_icon_and_version_metadata():
     assert "StringStruct('ProductName', 'NullLauncher')" in version_info
     assert "StringStruct('FileDescription', 'Terminal Minecraft Launcher')" in version_info
     assert "StringStruct('CompanyName', 'BrawliPup12')" in version_info
-    assert "StringStruct('FileVersion', '1.11.4.0')" in version_info
-    assert "StringStruct('ProductVersion', '1.11.4.0')" in version_info
+    assert "StringStruct('FileVersion', '1.11.5.0')" in version_info
+    assert "StringStruct('ProductVersion', '1.11.5.0')" in version_info
 
 
 def test_console_window_icon_is_applied_on_windows():
@@ -398,7 +398,7 @@ def test_project_metadata_matches_app_version():
     from pathlib import Path
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "1.11.4"' in pyproject
+    assert 'version = "1.11.5"' in pyproject
 
 
 def test_windows_build_uses_native_windowed_frontend():
@@ -421,3 +421,45 @@ def test_windows_verifier_checks_gui_subsystem():
     assert "_verify_windowed_subsystem" in verifier
     assert "subsystem != 2" in verifier
 
+
+
+def test_windowed_news_geometry_returns_only_occupied_cells():
+    from PIL import Image
+    from null_launcher.window_terminal import WindowTerminal
+
+    term = object.__new__(WindowTerminal)
+    term._char_w = 8
+    term._line_h = 16
+    image = Image.new("RGB", (640, 360), "white")
+    geometry = term.sixel_geometry(image, 80, 20)
+    assert isinstance(geometry, tuple)
+    assert len(geometry) == 2
+    assert geometry[0] > 0 and geometry[1] > 0
+
+
+def test_windowed_mouse_motion_is_coalesced():
+    import queue
+    from types import SimpleNamespace
+    from null_launcher.window_terminal import WindowTerminal
+
+    term = object.__new__(WindowTerminal)
+    term._events = queue.Queue()
+    term._latest_motion = None
+    term._motion_pending = False
+    term._char_w = 8
+    term._line_h = 16
+    term._on_motion(SimpleNamespace(x=8, y=16))
+    term._on_motion(SimpleNamespace(x=8, y=80))
+    term._on_motion(SimpleNamespace(x=8, y=160))
+    assert term._events.qsize() == 1
+    assert term._latest_motion is not None
+    assert term._latest_motion.y == 10
+
+
+def test_minecraft_launch_hides_java_console_on_windows():
+    import inspect
+    from null_launcher.app import NullLauncher
+
+    source = inspect.getsource(NullLauncher.play)
+    assert "CREATE_NO_WINDOW" in source
+    assert "CREATE_NEW_PROCESS_GROUP" in source

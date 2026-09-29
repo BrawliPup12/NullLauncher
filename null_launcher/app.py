@@ -1246,7 +1246,15 @@ class NullLauncher:
             game_cwd = Path(options["gameDirectory"])
             game_cwd.mkdir(parents=True, exist_ok=True)
             log_file = log_path.open("w", encoding="utf-8", errors="replace")
-            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            creationflags = 0
+            if os.name == "nt":
+                # The launcher itself is a GUI executable now.  Starting java.exe
+                # without CREATE_NO_WINDOW makes Windows allocate a stray CMD
+                # window even though Minecraft renders its own LWJGL window.
+                creationflags = (
+                    getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                    | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                )
             try:
                 process = subprocess.Popen(
                     command,
