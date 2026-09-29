@@ -5,7 +5,7 @@ from typing import Any, Optional
 from .localization import I18N, LANGUAGES, SPLASH_LINES
 
 APP_NAME = "NullLauncher"
-APP_VERSION = "1.11.7"
+APP_VERSION = "1.11.8"
 REQUIRED_MLL = "8.0"
 REQUIRED_PILLOW = "12.3.0"
 MIN_PYTHON = (3, 10)

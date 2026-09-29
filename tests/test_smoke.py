@@ -4,8 +4,10 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 
 def test_identity():
+    import re
+
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.7"
+    assert re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION)
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -333,8 +335,12 @@ def test_windows_build_has_icon_and_version_metadata():
     assert "StringStruct('ProductName', 'NullLauncher')" in version_info
     assert "StringStruct('FileDescription', 'Terminal Minecraft Launcher')" in version_info
     assert "StringStruct('CompanyName', 'BrawliPup12')" in version_info
-    assert "StringStruct('FileVersion', '1.11.6.0')" in version_info
-    assert "StringStruct('ProductVersion', '1.11.6.0')" in version_info
+    parts = [int(part) for part in APP_VERSION.split(".")]
+    while len(parts) < 4:
+        parts.append(0)
+    windows_version = ".".join(str(part) for part in parts[:4])
+    assert f"StringStruct('FileVersion', '{windows_version}')" in version_info
+    assert f"StringStruct('ProductVersion', '{windows_version}')" in version_info
 
 
 def test_console_window_icon_is_applied_on_windows():
@@ -376,6 +382,7 @@ def test_build_pipeline_verifies_custom_icon_resource():
     assert "verify_windows_build.py" in build
     assert "verify_windows_build.py" in workflow
     assert "Verify release tag matches launcher version" in workflow
+    assert "GH_REPO: ${{ github.repository }}" in workflow
     assert "EXE icon does not match assets/NullLauncher.ico" in verifier
 
 
@@ -400,9 +407,13 @@ def test_frozen_restarts_reset_pyinstaller_environment():
 
 def test_project_metadata_matches_app_version():
     from pathlib import Path
+    import re
+
     root = Path(__file__).resolve().parents[1]
     pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'version = "1.11.7"' in pyproject
+    match = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.MULTILINE)
+    assert match is not None
+    assert match.group(1) == APP_VERSION
 
 
 def test_windows_build_uses_native_windowed_frontend():
