@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.0"
+    assert APP_VERSION == "1.11.1"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -127,22 +127,55 @@ def test_news_filter_label_exists_for_every_language():
         assert I18N[language].get("news_filter_color")
 
 
-def test_windows_update_helper_replaces_restarts_and_cleans_up(tmp_path):
-    from null_launcher.updater import _build_windows_replacer_script
+def test_update_installer_replaces_target_and_keeps_backup(tmp_path):
+    import hashlib
+    from null_launcher.updater import _install_downloaded_executable
 
-    source = tmp_path / "staged.exe"
+    source = tmp_path / "downloaded.exe"
     target = tmp_path / "NullLauncher.exe"
-    log = tmp_path / "update.log"
-    script = _build_windows_replacer_script(source, target, 1234, "ab" * 32, log)
+    source.write_bytes(b"MZ-new-launcher")
+    target.write_bytes(b"MZ-old-launcher")
+    expected = hashlib.sha256(source.read_bytes()).hexdigest()
 
-    assert "Wait-Process -Id $pidToWait" in script
-    assert "[System.IO.File]::Replace" in script
-    assert "Start-Process -FilePath $target" in script
-    assert "Remove-Item -LiteralPath $src" in script
-    assert "--update-health-file" in script
-    assert "Health check failed; rolling back." in script
-    assert "Move-Item -LiteralPath $backup -Destination $target" in script
-    assert "Remove-Item -LiteralPath $PSCommandPath" in script
+    backup, staged = _install_downloaded_executable(source, target, expected)
+    assert target.read_bytes() == b"MZ-new-launcher"
+    assert backup.read_bytes() == b"MZ-old-launcher"
+    assert not staged.exists()
+
+
+def test_windows_updater_uses_downloaded_exe_as_helper():
+    import inspect
+    from null_launcher import updater
+
+    source = inspect.getsource(updater.spawn_update_replacer)
+    assert "--apply-update" in source
+    assert "CREATE_NO_WINDOW" in source
+    assert "powershell" not in source.lower()
+
+
+def test_terminal_text_input_preserves_letter_case():
+    import inspect
+    from null_launcher.terminal import Terminal
+
+    win_source = inspect.getsource(Terminal._read_windows_event)
+    posix_source = inspect.getsource(Terminal._read_posix_event)
+    assert "ch.lower()" not in win_source
+    assert "ch.lower()" not in posix_source
+
+
+def test_cli_accepts_internal_update_helper_arguments():
+    from null_launcher.cli import parse_args
+
+    args = parse_args([
+        "--apply-update", "C:/Apps/NullLauncher.exe",
+        "--wait-pid", "123",
+        "--expected-sha256", "ab" * 32,
+        "--update-metadata", "C:/Temp/meta.json",
+        "--update-log", "C:/Temp/update.log",
+    ])
+    assert args.apply_update.endswith("NullLauncher.exe")
+    assert args.wait_pid == 123
+    assert args.expected_sha256 == "ab" * 32
 
 
 def test_update_staging_directory_is_separate_and_overridable(tmp_path, monkeypatch):

@@ -8,9 +8,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from typing import Any, Optional
 from urllib.error import HTTPError
@@ -221,108 +223,266 @@ def download_github_update(info: UpdateInfo, target: Path, timeout: float = 30.0
         raise
 
 
-def _ps_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+
+def _append_update_log(path: Path, message: str) -> None:
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{stamp} {message}\n")
+    except OSError:
+        pass
 
 
-def _build_windows_replacer_script(
-    downloaded: Path,
-    target: Path,
-    pid: int,
-    digest: str,
-    log_path: Path,
-    metadata_path: Optional[Path] = None,
-    health_path: Optional[Path] = None,
-) -> str:
-    root = downloaded.parent
-    meta = metadata_path or (root / ".pending-update-metadata.json")
-    health = health_path or (root / ".health-check")
-    pending = root / "pending-update.json"
-    return (
-        "$ErrorActionPreference = 'Stop'\n"
-        f"$src = {_ps_quote(str(downloaded))}\n"
-        f"$target = {_ps_quote(str(target))}\n"
-        f"$pidToWait = {int(pid)}\n"
-        f"$expectedHash = {_ps_quote(digest.upper())}\n"
-        f"$logPath = {_ps_quote(str(log_path))}\n"
-        f"$metaSrc = {_ps_quote(str(meta))}\n"
-        f"$pending = {_ps_quote(str(pending))}\n"
-        f"$healthFile = {_ps_quote(str(health))}\n"
-        "$targetDir = Split-Path -Parent $target\n"
-        "$new = Join-Path $targetDir ('.NullLauncher.update-' + $pidToWait + '.exe')\n"
-        "$backup = Join-Path $targetDir ('.NullLauncher.previous-' + $pidToWait + '.exe')\n"
-        "$installed = $false\n"
-        "$success = $false\n"
-        "function Write-UpdateLog([string]$message) {\n"
-        "  try { Add-Content -LiteralPath $logPath -Value ((Get-Date -Format 'yyyy-MM-dd HH:mm:ss') + ' ' + $message) -Encoding UTF8 } catch {}\n"
-        "}\n"
-        "function Hide-File([string]$path) {\n"
-        "  try { if (Test-Path -LiteralPath $path) { (Get-Item -LiteralPath $path -Force).Attributes = ((Get-Item -LiteralPath $path -Force).Attributes -bor [IO.FileAttributes]::Hidden) } } catch {}\n"
-        "}\n"
-        "Write-UpdateLog 'Updater helper started.'\n"
-        "try { Wait-Process -Id $pidToWait -ErrorAction SilentlyContinue } catch {}\n"
-        "for ($attempt = 0; $attempt -lt 120 -and -not $installed; $attempt++) {\n"
-        "  try {\n"
-        "    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
-        "    Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
-        "    Copy-Item -LiteralPath $src -Destination $new -Force\n"
-        "    Hide-File $new\n"
-        "    $newHash = (Get-FileHash -LiteralPath $new -Algorithm SHA256).Hash.ToUpperInvariant()\n"
-        "    if ($newHash -ne $expectedHash) { throw 'Staged update hash mismatch.' }\n"
-        "    if (Test-Path -LiteralPath $target) {\n"
-        "      try {\n"
-        "        [System.IO.File]::Replace($new, $target, $backup, $true)\n"
-        "      } catch {\n"
-        "        Move-Item -LiteralPath $target -Destination $backup -Force\n"
-        "        try { Move-Item -LiteralPath $new -Destination $target -Force }\n"
-        "        catch { Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue; throw }\n"
-        "      }\n"
-        "    } else {\n"
-        "      Move-Item -LiteralPath $new -Destination $target -Force\n"
-        "    }\n"
-        "    $targetHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToUpperInvariant()\n"
-        "    if ($targetHash -ne $expectedHash) { throw 'Installed update hash mismatch.' }\n"
-        "    Hide-File $backup\n"
-        "    $installed = $true\n"
-        "    Write-UpdateLog 'New executable installed; starting health check.'\n"
-        "  } catch {\n"
-        "    Write-UpdateLog ('Install attempt ' + ($attempt + 1) + ' failed: ' + $_.Exception.Message)\n"
-        "    if (Test-Path -LiteralPath $backup) { Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue; Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue }\n"
-        "    Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
-        "    Start-Sleep -Milliseconds 500\n"
-        "  }\n"
-        "}\n"
-        "if ($installed) {\n"
-        "  try {\n"
-        "    Remove-Item -LiteralPath $healthFile -Force -ErrorAction SilentlyContinue\n"
-        "    if (Test-Path -LiteralPath $metaSrc) { Copy-Item -LiteralPath $metaSrc -Destination $pending -Force; Hide-File $pending }\n"
-        "    $proc = Start-Process -FilePath $target -WorkingDirectory $targetDir -ArgumentList @('--update-health-file', $healthFile) -PassThru\n"
-        "    for ($healthAttempt = 0; $healthAttempt -lt 360; $healthAttempt++) {\n"
-        "      if (Test-Path -LiteralPath $healthFile) { $success = $true; break }\n"
-        "      try { if ($proc.HasExited) { break } } catch {}\n"
-        "      Start-Sleep -Milliseconds 250\n"
-        "    }\n"
-        "  } catch { Write-UpdateLog ('Health-check launch failed: ' + $_.Exception.Message) }\n"
-        "}\n"
-        "if ($success) {\n"
-        "  Write-UpdateLog 'Update health check passed.'\n"
-        "  Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue\n"
-        "} elseif ($installed) {\n"
-        "  Write-UpdateLog 'Health check failed; rolling back.'\n"
-        "  try { if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Wait-Process -Id $proc.Id -ErrorAction SilentlyContinue } } catch {}\n"
-        "  Remove-Item -LiteralPath $pending -Force -ErrorAction SilentlyContinue\n"
-        "  Remove-Item -LiteralPath $target -Force -ErrorAction SilentlyContinue\n"
-        "  if (Test-Path -LiteralPath $backup) { Move-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue }\n"
-        "  if (Test-Path -LiteralPath $target) { try { Start-Process -FilePath $target -WorkingDirectory $targetDir } catch { Write-UpdateLog ('Rollback restart failed: ' + $_.Exception.Message) } }\n"
-        "}\n"
-        "Remove-Item -LiteralPath $new -Force -ErrorAction SilentlyContinue\n"
-        "Remove-Item -LiteralPath $src -Force -ErrorAction SilentlyContinue\n"
-        "Remove-Item -LiteralPath $metaSrc -Force -ErrorAction SilentlyContinue\n"
-        "Remove-Item -LiteralPath $healthFile -Force -ErrorAction SilentlyContinue\n"
-        "if (-not $success -and -not $installed -and (Test-Path -LiteralPath $target)) { try { Start-Process -FilePath $target -WorkingDirectory $targetDir } catch {} }\n"
-        "if (-not $success) { Write-UpdateLog 'Update did not pass health check; previous launcher was restored when possible.' }\n"
-        "Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue\n"
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest().lower()
+
+
+def _wait_for_pid_exit(pid: int, timeout: float = 120.0) -> bool:
+    if pid <= 0:
+        return True
+    if os.name == "nt":
+        SYNCHRONIZE = 0x00100000
+        WAIT_OBJECT_0 = 0x00000000
+        k32 = ctypes.windll.kernel32
+        k32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+        k32.OpenProcess.restype = ctypes.c_void_p
+        k32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+        k32.WaitForSingleObject.restype = ctypes.c_uint32
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = k32.OpenProcess(SYNCHRONIZE, False, int(pid))
+        if not handle:
+            return True
+        try:
+            result = int(k32.WaitForSingleObject(handle, max(0, int(timeout * 1000))))
+            return result == WAIT_OBJECT_0
+        finally:
+            k32.CloseHandle(handle)
+
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            pass
+        time.sleep(0.10)
+    return False
+
+
+def _schedule_delete_on_reboot(path: Path) -> None:
+    if os.name != "nt":
+        return
+    with contextlib.suppress(Exception):
+        MOVEFILE_DELAY_UNTIL_REBOOT = 0x00000004
+        move_file_ex = ctypes.windll.kernel32.MoveFileExW
+        move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32]
+        move_file_ex.restype = ctypes.c_int
+        move_file_ex(str(path), None, MOVEFILE_DELAY_UNTIL_REBOOT)
+
+
+def schedule_cleanup_path(path: str | Path) -> None:
+    target = Path(path).expanduser()
+    if not str(target):
+        return
+
+    def worker() -> None:
+        for _ in range(160):
+            time.sleep(0.25)
+            try:
+                target.unlink(missing_ok=True)
+                return
+            except OSError:
+                continue
+        _schedule_delete_on_reboot(target)
+
+    threading.Thread(target=worker, name="NullUpdateCleanup", daemon=True).start()
+
+
+def _launch_visible_launcher(target: Path, extra_args: Optional[list[str]] = None) -> subprocess.Popen[Any]:
+    args = [str(target)] + list(extra_args or [])
+    flags = 0
+    if os.name == "nt":
+        flags |= getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
+        flags |= getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    return subprocess.Popen(
+        args,
+        cwd=str(target.parent),
+        stdin=subprocess.DEVNULL,
+        creationflags=flags,
+        close_fds=True,
     )
+
+
+def _install_downloaded_executable(source: Path, target: Path, expected_hash: str) -> tuple[Path, Path]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    token = uuid.uuid4().hex
+    staged = target.parent / f".{APP_NAME}.update-{token}.exe"
+    backup = target.parent / f".{APP_NAME}.previous-{token}.exe"
+    shutil.copyfile(source, staged)
+    _mark_hidden(staged)
+    actual = _sha256_path(staged)
+    if actual != expected_hash.lower():
+        staged.unlink(missing_ok=True)
+        raise RuntimeError("Staged update hash mismatch")
+
+    moved_old = False
+    try:
+        if target.exists():
+            os.replace(target, backup)
+            moved_old = True
+            _mark_hidden(backup)
+        os.replace(staged, target)
+        if _sha256_path(target) != expected_hash.lower():
+            raise RuntimeError("Installed update hash mismatch")
+        return backup, staged
+    except Exception:
+        with contextlib.suppress(OSError):
+            staged.unlink()
+        if moved_old and backup.exists():
+            with contextlib.suppress(OSError):
+                target.unlink()
+            with contextlib.suppress(OSError):
+                os.replace(backup, target)
+        raise
+
+
+def run_update_helper(
+    target: str | Path,
+    wait_pid: int,
+    expected_hash: str,
+    metadata_path: str | Path = "",
+    log_path: str | Path = "",
+) -> int:
+    source = Path(sys.executable).resolve()
+    target_path = Path(target).expanduser().resolve()
+    root = source.parent
+    log = Path(log_path).expanduser() if str(log_path) else (root.parent / "update.log")
+    metadata = Path(metadata_path).expanduser() if str(metadata_path) else None
+    pending = root / "pending-update.json"
+    health = root / f".health-{uuid.uuid4().hex}"
+    expected = str(expected_hash or "").strip().lower()
+
+    _append_update_log(log, f"Python updater helper started from {source}.")
+    if not expected or _sha256_path(source) != expected:
+        _append_update_log(log, "Updater helper hash mismatch; refusing to install.")
+        _schedule_delete_on_reboot(source)
+        return 2
+
+    if not _wait_for_pid_exit(int(wait_pid), 120.0):
+        _append_update_log(log, f"Timed out waiting for launcher PID {wait_pid} to exit.")
+        _schedule_delete_on_reboot(source)
+        return 3
+    _append_update_log(log, "Previous launcher process exited.")
+
+    backup: Optional[Path] = None
+    installed = False
+    last_error = ""
+    for attempt in range(1, 81):
+        try:
+            backup, _ = _install_downloaded_executable(source, target_path, expected)
+            installed = True
+            _append_update_log(log, f"New executable installed on attempt {attempt}.")
+            break
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+            _append_update_log(log, f"Install attempt {attempt} failed: {last_error}")
+            time.sleep(0.25)
+
+    if not installed:
+        _append_update_log(log, f"Update installation failed: {last_error or 'unknown error'}")
+        if target_path.exists():
+            with contextlib.suppress(Exception):
+                _launch_visible_launcher(target_path)
+        _schedule_delete_on_reboot(source)
+        return 4
+
+    with contextlib.suppress(OSError):
+        health.unlink()
+
+    if metadata is not None and metadata.exists():
+        try:
+            shutil.copyfile(metadata, pending)
+            _mark_hidden(pending)
+        except OSError as exc:
+            _append_update_log(log, f"Could not stage What's New metadata: {exc}")
+
+    proc: Optional[subprocess.Popen[Any]] = None
+    try:
+        proc = _launch_visible_launcher(
+            target_path,
+            ["--update-health-file", str(health), "--cleanup-update-helper", str(source)],
+        )
+        _append_update_log(log, f"Started updated launcher PID {proc.pid}; waiting for health signal.")
+    except Exception as exc:
+        _append_update_log(log, f"Could not restart updated launcher: {type(exc).__name__}: {exc}")
+
+    healthy = False
+    if proc is not None:
+        deadline = time.monotonic() + 60.0
+        while time.monotonic() < deadline:
+            if health.exists():
+                healthy = True
+                break
+            if proc.poll() is not None:
+                break
+            time.sleep(0.20)
+
+    if healthy:
+        _append_update_log(log, "Update health check passed.")
+        if backup is not None:
+            with contextlib.suppress(OSError):
+                backup.unlink()
+        if metadata is not None:
+            with contextlib.suppress(OSError):
+                metadata.unlink()
+        with contextlib.suppress(OSError):
+            health.unlink()
+        _schedule_delete_on_reboot(source)
+        return 0
+
+    _append_update_log(log, "Updated launcher did not pass health check; rolling back.")
+    if proc is not None and proc.poll() is None:
+        with contextlib.suppress(Exception):
+            proc.terminate()
+            proc.wait(timeout=5)
+        if proc.poll() is None:
+            with contextlib.suppress(Exception):
+                proc.kill()
+                proc.wait(timeout=5)
+
+    with contextlib.suppress(OSError):
+        pending.unlink()
+    with contextlib.suppress(OSError):
+        target_path.unlink()
+    if backup is not None and backup.exists():
+        try:
+            os.replace(backup, target_path)
+            _append_update_log(log, "Previous executable restored.")
+        except OSError as exc:
+            _append_update_log(log, f"Rollback restore failed: {exc}")
+    if metadata is not None:
+        with contextlib.suppress(OSError):
+            metadata.unlink()
+    with contextlib.suppress(OSError):
+        health.unlink()
+
+    if target_path.exists():
+        try:
+            _launch_visible_launcher(target_path)
+            _append_update_log(log, "Previous launcher restarted after rollback.")
+        except Exception as exc:
+            _append_update_log(log, f"Rollback restart failed: {type(exc).__name__}: {exc}")
+    _schedule_delete_on_reboot(source)
+    return 5
 
 
 def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateInfo] = None) -> None:
@@ -332,10 +492,9 @@ def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateI
     if os.name == "nt" and getattr(sys, "frozen", False):
         root = _prepare_update_root()
         log_path = root.parent / "update.log"
-        digest = hashlib.sha256(downloaded.read_bytes()).hexdigest()
+        digest = _sha256_path(downloaded)
         token = uuid.uuid4().hex
         metadata = root / f".metadata-{token}.json"
-        health = root / f".health-{token}"
         payload = {
             "version": str(info.version if info else APP_VERSION),
             "previous_version": APP_VERSION,
@@ -346,34 +505,35 @@ def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateI
         }
         metadata.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
         _mark_hidden(metadata)
-        script = root / f".apply-{token}.ps1"
-        script.write_text(
-            _build_windows_replacer_script(downloaded, target, os.getpid(), digest, log_path, metadata, health),
-            encoding="utf-8-sig",
-        )
-        _mark_hidden(script)
-        powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
-        executable = str(powershell if powershell.exists() else "powershell.exe")
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
-        subprocess.Popen(
-            [
-                executable,
-                "-NoProfile",
-                "-NonInteractive",
-                "-WindowStyle",
-                "Hidden",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-File",
-                str(script),
-            ],
-            cwd=str(root),
-            creationflags=flags,
-            close_fds=True,
-        )
+
+        _append_update_log(log_path, f"Launching {downloaded.name} as updater helper for {target}.")
+        args = [
+            str(downloaded),
+            "--apply-update", str(target),
+            "--wait-pid", str(os.getpid()),
+            "--expected-sha256", digest,
+            "--update-metadata", str(metadata),
+            "--update-log", str(log_path),
+        ]
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            with log_path.open("ab") as stream:
+                proc = subprocess.Popen(
+                    args,
+                    cwd=str(root),
+                    stdin=subprocess.DEVNULL,
+                    stdout=stream,
+                    stderr=subprocess.STDOUT,
+                    creationflags=flags,
+                    close_fds=True,
+                )
+            _append_update_log(log_path, f"Updater helper process created with PID {proc.pid}.")
+        except Exception as exc:
+            _append_update_log(log_path, f"Failed to start updater helper: {type(exc).__name__}: {exc}")
+            raise
         return
 
-    helper = r'''import os, subprocess, sys, time
+    helper = """import os, subprocess, sys, time
 src, target, python = sys.argv[1:4]
 for _ in range(100):
     try:
@@ -382,7 +542,7 @@ for _ in range(100):
         break
     except (PermissionError, OSError):
         time.sleep(0.10)
-'''
+"""
     subprocess.Popen(
         [sys.executable, "-c", helper, str(downloaded), str(target), sys.executable],
         cwd=str(target.parent),

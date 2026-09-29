@@ -587,7 +587,7 @@ class Terminal:
                     return InputEvent("key", keys[vk])
                 ch = rec.KeyEvent.UnicodeChar
                 if ch and ord(ch) >= 32:
-                    return InputEvent("key", ch.lower())
+                    return InputEvent("key", ch)
             elif rec.EventType == 2 and self.mouse_enabled:
                 m = rec.MouseEvent
                 if m.dwEventFlags == 0:
@@ -612,7 +612,7 @@ class Terminal:
             if ch in ("\x00", "\xe0"):
                 ext = msvcrt.getwch()
                 return InputEvent("key", {"H": "up", "P": "down", "K": "left", "M": "right", "I": "pageup", "Q": "pagedown", "G": "home", "O": "end"}.get(ext, ""))
-            return InputEvent("key", {"\r": "enter", "\x1b": "escape"}.get(ch, ch.lower()))
+            return InputEvent("key", {"\r": "enter", "\x1b": "escape"}.get(ch, ch))
 
         import termios
         import tty
@@ -631,7 +631,7 @@ class Terminal:
                 return InputEvent("key", "escape")
             if ch in ("\r", "\n"):
                 return InputEvent("key", "enter")
-            return InputEvent("key", ch.lower())
+            return InputEvent("key", ch)
         finally:
             termios.tcsetattr(fd, termios.TCSADRAIN, old)
 
