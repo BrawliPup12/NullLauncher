@@ -18,13 +18,17 @@ def test_centered_sixel_column_is_symmetric():
 
 
 def test_exe_update_payload_validation():
+    import hashlib
+
+    raw = b"MZ" + b"x" * 1024
     info = UpdateInfo(
         version="99.0.0",
         tag="v99.0.0",
         release_url="https://example.invalid/release",
         download_url="https://example.invalid/NullLauncher.exe",
+        digest="sha256:" + hashlib.sha256(raw).hexdigest(),
     )
-    assert _validate_update_payload(b"MZ" + b"x" * 1024, info) == "99.0.0"
+    assert _validate_update_payload(raw, info) == "99.0.0"
 
 
 def test_da1_sixel_detection():
@@ -492,3 +496,29 @@ def test_windowed_backend_exposes_sixel_cache_alias():
 
     source = inspect.getsource(WindowTerminal.__init__)
     assert "self._sixel_cache = self._image_cache" in source
+
+
+def test_news_identity_ignores_minecraft_locale_prefix():
+    from null_launcher.news import _news_identity
+
+    english = {"url": "https://www.minecraft.net/en-us/article/example-story?ref=home", "title": "Example Story"}
+    russian = {"url": "https://www.minecraft.net/ru-ru/article/example-story", "title": "Пример истории"}
+    polish = {"url": "https://minecraft.net/pl-pl/article/example-story/", "title": "Przykładowa historia"}
+
+    assert _news_identity(english) == _news_identity(russian) == _news_identity(polish)
+
+
+def test_latest_news_link_extraction_dedupes_localized_variants():
+    from null_launcher.news import _extract_latest_article_urls
+
+    document = """
+    <h2>What's new in Minecraft</h2>
+    <a href="/en-us/article/example-story">English</a>
+    <a href="/ru-ru/article/example-story">Russian</a>
+    <a href="/pl-pl/article/another-story">Another</a>
+    <h2>Frequently Asked Questions</h2>
+    """
+    links = _extract_latest_article_urls(document, limit=10)
+    assert len(links) == 2
+    assert links[0].endswith("/en-us/article/example-story")
+    assert links[1].endswith("/pl-pl/article/another-story")

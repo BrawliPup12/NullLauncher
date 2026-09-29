@@ -1,53 +1,32 @@
 from __future__ import annotations
 
-import argparse
-import contextlib
-import ctypes
-import dataclasses
-import hashlib
-import html
-import io
-from html.parser import HTMLParser
-import json
 import logging
-from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import platform
 import queue
 import re
 import shutil
-import signal
 import subprocess
 import sys
-import tempfile
-import textwrap
 import threading
 import time
-import uuid
-import unicodedata
-import webbrowser
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlencode, quote
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from . import config as cfg
 from .config import APP_NAME, APP_VERSION, BOLD, DIM, LANGUAGES, MC_NAME_RE, RED, RESET, SPLASH_LINES, YELLOW, apply_runtime_preferences, normalize_user_color, section_label, tr
-from .utils import brand_logo_lines, center_ansi, centered_splash_progress, clean_markup, clip, decode_article_image, normalize_version_type, now_iso, offline_uuid, proxy_game_arguments, proxy_jvm_arguments, proxy_label, recommended_ram_mb, safe_int, slug, tail_text, valid_proxy_host, wrap_plain
+from .utils import brand_logo_lines, center_ansi, centered_splash_progress, clean_markup, clip, normalize_version_type, now_iso, offline_uuid, portable_mode_enabled, proxy_game_arguments, proxy_jvm_arguments, proxy_label, recommended_ram_mb, safe_int, slug, tail_text, wrap_plain
 from .updater import check_github_update, clear_update_download_cache, consume_pending_update, download_github_update, running_artifact_path, signal_update_health, spawn_update_replacer
 from .state import StateStore
 from .download_cache import DownloadCache
-from .terminal import Menu, MenuGraphic, MenuItem, Terminal
-from .news import NEWS_LIMIT, _article_from_url, _download_article_image_bytes, _news_translation_ident, _news_translation_signature
+from .terminal import Menu, MenuItem, Terminal
 from .catalog import LauncherData, VersionEntry
+from .crash_assistant import diagnose_minecraft_crash
+from .news_ui import NewsScreenMixin
+from .profiles_ui import ProfileScreenMixin
 
                                                                              
 
-class NullLauncher:
+class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
     def __init__(self, store: StateStore, term: Terminal, mll: Any, logger: logging.Logger):
         self.store = store
         apply_runtime_preferences(self.store.settings)
@@ -195,19 +174,34 @@ class NullLauncher:
             selected = self.store.data.get("selected_version") or tr("not_selected")
             acc_name = account["name"] if account else tr("not_selected")
             proxy_name = proxy["name"] if proxy else tr("none")
+            mode_suffix = f" · {tr('portable_mode')}" if portable_mode_enabled() else ""
             header = [
-                f"{cfg.SUBTITLE_COLOR}{DIM}NullLauncher v{APP_VERSION}{RESET}",
+                f"{cfg.SUBTITLE_COLOR}{DIM}NullLauncher v{APP_VERSION}{mode_suffix}{RESET}",
                 f"{cfg.SUBTITLE_COLOR}{DIM}{tr('account')}:{RESET} {acc_name}    {cfg.SUBTITLE_COLOR}{DIM}{tr('version')}:{RESET} {selected}",
                 f"{cfg.SUBTITLE_COLOR}{DIM}{tr('proxy')}:{RESET} {proxy_name}",
             ]
-            items = [
-                MenuItem(tr("play"), "play"),
+            last_launch = self.store.last_launch()
+            if last_launch.get("version"):
+                stamp = str(last_launch.get("launched_at") or "").replace("T", " ").replace("Z", "")[:19]
+                header.append(f"{cfg.SUBTITLE_COLOR}{DIM}{tr('last_played')}:{RESET} {last_launch['version']}" + (f" · {stamp}" if stamp else ""))
+
+            items = [MenuItem(tr("play"), "play")]
+            quick_versions: list[tuple[str, str]] = []
+            if last_launch.get("version"):
+                quick_versions.append((tr("quick_play_last", version=last_launch["version"]), str(last_launch["version"])))
+            for favorite in self.store.favorite_versions():
+                if favorite != last_launch.get("version"):
+                    quick_versions.append((tr("quick_play_favorite", version=favorite), favorite))
+            if quick_versions:
+                items.append(MenuItem(section_label(tr("quick_play_section")), selectable=False))
+                items.extend(MenuItem(label, ("quick-play", version)) for label, version in quick_versions[:4])
+            items.extend([
                 MenuItem(tr("versions"), "versions"),
                 MenuItem(tr("accounts"), "accounts"),
                 MenuItem(tr("proxies"), "proxies"),
                 MenuItem(tr("settings"), "settings"),
                 MenuItem(tr("exit"), "exit"),
-            ]
+            ])
             action = self.menu.choose(
                 "", items, header=header, allow_escape=False,
                 footer=tr("footer_main"),
@@ -216,6 +210,10 @@ class NullLauncher:
             )
             try:
                 if action == "play": self.play()
+                elif isinstance(action, tuple) and action and action[0] == "quick-play":
+                    self.store.data["selected_version"] = str(action[1])
+                    self.store.save()
+                    self.play()
                 elif action == "versions": self.versions_screen()
                 elif action == "accounts": self.accounts_screen()
                 elif action == "proxies": self.proxies_screen()
@@ -380,172 +378,12 @@ class NullLauncher:
                                                                              
 
     @staticmethod
-    def _news_field(entry: dict[str, Any], *keys: str) -> str:
-        for key in keys:
-            value = entry.get(key)
-            if value:
-                return clean_markup(value)
-        return ""
 
-    def _localized_news_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
-        """Return the startup-pretranslated article without blocking the UI.
 
-        All supported languages are prepared in parallel during the splash
-        screen.  If one translation failed there, the canonical English text is
-        shown immediately instead of making the user wait inside the news view.
-        """
-        language = str(self.store.settings.get("language") or "en")
-        if language == "en":
-            return dict(entry)
 
-        ident = _news_translation_ident(entry)
-        signature = _news_translation_signature(entry)
-        root = self.store.cache.get("news_translations", {})
-        lang_cache = root.get(language, {}) if isinstance(root, dict) else {}
-        cached = lang_cache.get(ident) if isinstance(lang_cache, dict) else None
-        merged = dict(entry)
-        if isinstance(cached, dict) and cached.get("signature") == signature:
-            for field in ("title", "description", "category"):
-                value = cached.get(field)
-                if value:
-                    merged[field] = clean_markup(value)
-        return merged
 
-    def _article_url(self, entry: dict[str, Any]) -> str:
-        for key in ("readMoreLink", "link", "url", "articleUrl"):
-            raw = entry.get(key)
-            if isinstance(raw, str) and raw.startswith(("http://", "https://")):
-                return raw
-        return ""
 
-    def _resolve_news_image_url(self, entry: dict[str, Any]) -> str:
-        """Return the real image advertised by the official article page."""
-        article_url = self._article_url(entry)
-        image_url = str(entry.get("image") or "").strip()
-        origin = str(entry.get("image_origin") or "").strip().lower()
 
-                                                                                 
-                                                                                  
-                                                             
-        if article_url and "minecraft.net/" in article_url.lower() and "/article/" in article_url.lower() and origin != "page":
-            try:
-                fresh = _article_from_url(article_url)
-                official = str(fresh.get("image") or "").strip()
-                if official:
-                    image_url = official
-                    entry["image"] = official
-                    entry["image_origin"] = "page"
-            except Exception as exc:
-                self.log.debug("Article image metadata refresh failed for %s: %s", article_url, exc)
-
-        if image_url and article_url:
-            image_url = urljoin(article_url, image_url)
-        return image_url if image_url.startswith(("http://", "https://")) else ""
-
-    def _load_news_image(self, entry: dict[str, Any]) -> Optional[Any]:
-        image_url = self._resolve_news_image_url(entry)
-        if not image_url:
-            return None
-        cached = self._news_image_cache.get(image_url)
-        if cached is not None:
-            return cached
-        try:
-            raw = self.download_cache.fetch(
-                image_url,
-                lambda: _download_article_image_bytes(image_url),
-                max_age_seconds=30 * 24 * 60 * 60,
-            )
-            image = decode_article_image(raw)
-            self._news_image_cache[image_url] = image
-            return image
-        except Exception as exc:
-            self.log.warning("News image download/decode failed: %s (%s)", image_url, exc)
-            self.download_cache.remove(image_url)
-            return None
-
-    def news_screen(self) -> None:
-        if not self.data.news:
-            self.message(tr("news"), tr("news_unavailable"), error=bool(self.data.network_errors))
-            return
-        while True:
-            items: list[MenuItem] = []
-            for i, entry in enumerate(self.data.news[:NEWS_LIMIT]):
-                display_entry = self._localized_news_entry(entry)
-                title = self._news_field(display_entry, "title") or f"{tr('article')} {i + 1}"
-                category = self._news_field(display_entry, "category", "tag", "type")
-                date = self._news_field(entry, "date", "publishDate", "published", "publishedAt")
-                items.append(MenuItem(title, ("article", i), hint=" · ".join(x for x in (category, date) if x)))
-            items.append(MenuItem(tr("back"), ("back", -1)))
-            action = self.menu.choose(tr("news"), items, view_key="news-list", spacer_after_title=True)
-            if not action or action[0] == "back": return
-            if action[0] == "article": self.news_article_screen(action[1])
-
-    def news_article_screen(self, index: int) -> None:
-        if not (0 <= index < len(self.data.news)):
-            return
-        base_entry = self.data.news[index]
-        language = str(self.store.settings.get("language") or "en")
-        entry = self._localized_news_entry(base_entry) if language != "en" else dict(base_entry)
-
-        title = self._news_field(entry, "title") or tr("news")
-        body = self._news_field(entry, "text", "description", "summary", "excerpt")
-        category = self._news_field(entry, "category", "tag", "type")
-        date = self._news_field(entry, "date", "publishDate", "published", "publishedAt")
-                                                                                
-                                                                                 
-                                                                                 
-        url = self._article_url(base_entry) or self._article_url(entry)
-        real_image = self._load_news_image(entry)
-        meta = " · ".join(x for x in (category, date) if x)
-        items = ([MenuItem(tr("open_browser"), "open")] if url else []) + [MenuItem(tr("back_news"), "back")]
-
-        def article_graphic(size: os.terminal_size) -> Optional[MenuGraphic]:
-            if real_image is None or not self.term.supports_sixel():
-                return None
-            columns, rows = max(20, int(size.columns)), max(8, int(size.lines))
-            logo_rows = len(brand_logo_lines(columns, rows))
-                                                                           
-                                                                                
-            max_rows = max(3, rows - logo_rows - 11)
-            requested_rows = max(3, min(36, max_rows, int(rows * 0.54)))
-            requested_columns = max(20, min(220, columns - 6))
-                                                                                
-                                                                               
-                                                
-            actual_columns, actual_rows = self.term.sixel_geometry(
-                real_image, requested_columns, requested_rows
-            )
-            return MenuGraphic(
-                image=real_image,
-                key=f"news-image:{index}:{self._news_field(entry, 'image')}:{cfg.CURRENT_LANGUAGE}",
-                rows=max(2, actual_rows),
-                columns=max(4, requested_columns),
-            )
-
-        def article_subtitle(size: os.terminal_size) -> str:
-            lines: list[str] = []
-            if real_image is not None and not self.term.supports_sixel(): lines.append(tr("sixel_required"))
-            elif real_image is None: lines.append(tr("no_cover"))
-            if meta: lines.append(meta)
-            lines.append(body or tr("no_description"))
-            return "\n".join(lines)
-
-        while True:
-            action = self.menu.choose(
-                title,
-                items,
-                subtitle_factory=article_subtitle,
-                graphic_factory=article_graphic,
-                view_key=f"news-article:{index}:{cfg.CURRENT_LANGUAGE}",
-                content_width_limit=220,
-                graphic_reserve_rows=5,
-            )
-            if not action or action == "back": return
-            if action == "open" and url:
-                try:
-                    if not webbrowser.open(url): raise RuntimeError(tr("browser_open_failed"))
-                except Exception as exc:
-                    self.message(tr("browser"), f"{exc}\n\n{url}", error=True)
 
                                                                             
 
@@ -641,163 +479,13 @@ class NullLauncher:
 
                                                                             
 
-    def accounts_screen(self) -> None:
-        while True:
-            current = self.store.data.get("selected_account")
-            items = [MenuItem(tr("create_account"), ("create", None))]
-            if self.store.data["accounts"]:
-                items.append(MenuItem(section_label(tr("account_section")), selectable=False))
-            for account in self.store.data["accounts"]:
-                mark = "✓ " if account["name"] == current else "  "
-                items.append(MenuItem(mark + account["name"], ("account", account["name"])))
-            items.append(MenuItem(tr("back"), ("back", None)))
-            action = self.menu.choose(tr("accounts"), items, spacer_after_title=True, view_key="accounts")
-            if not action or action[0] == "back":
-                return
-            if action[0] == "create":
-                self.create_account()
-            else:
-                self.account_detail(action[1])
 
-    def create_account(self) -> None:
-        name = self.term.prompt(tr("account_name_prompt"))
-        if not MC_NAME_RE.fullmatch(name):
-            self.message(tr("invalid_name_title"), tr("invalid_account_name_body"), error=True)
-            return
-        if any(a["name"].lower() == name.lower() for a in self.store.data["accounts"]):
-            self.message(tr("account_exists_title"), tr("account_exists_body", name=name), error=True)
-            return
-        account = {"name": name, "uuid": offline_uuid(name), "type": "offline"}
-        self.store.data["accounts"].append(account)
-        self.store.data["selected_account"] = name
-        self.store.save()
 
-    def account_detail(self, name: str) -> None:
-        while True:
-            current = self.store.data.get("selected_account") == name
-            items = []
-            if not current:
-                items.append(MenuItem(tr("select_launch"), "select"))
-            items.extend([MenuItem(tr("delete"), "delete"), MenuItem(tr("back"), "back")])
-            action = self.menu.choose(name, items, subtitle=f"{tr('offline_uuid_label')}: {offline_uuid(name)}")
-            if not action or action == "back":
-                return
-            if action == "select":
-                self.store.data["selected_account"] = name
-                self.store.save()
-                return
-            if action == "delete":
-                if self.confirm(tr("delete_account_title"), tr("delete_account_body", name=name)):
-                    self.store.data["accounts"] = [a for a in self.store.data["accounts"] if a["name"] != name]
-                    if self.store.data.get("selected_account") == name:
-                        self.store.data["selected_account"] = self.store.data["accounts"][0]["name"] if self.store.data["accounts"] else None
-                    self.store.save()
-                    return
 
                                                                              
 
-    def proxies_screen(self) -> None:
-        while True:
-            current = self.store.data.get("selected_proxy")
-            direct_mark = "✓ " if current is None else "  "
-            items: list[MenuItem] = [
-                MenuItem(tr("create_proxy"), ("create", None)),
-                MenuItem(direct_mark + tr("direct"), ("direct", None)),
-            ]
-            if self.store.data["proxy_profiles"]:
-                items.append(MenuItem(section_label(tr("proxy_section")), selectable=False))
-            for profile in self.store.data["proxy_profiles"]:
-                mark = "✓ " if profile["id"] == current else "  "
-                hint = f"{proxy_label(profile)} · {profile['host']}:{profile['port']}"
-                items.append(MenuItem(mark + profile["name"], ("proxy", profile["id"]), hint=hint))
-            items.append(MenuItem(tr("back"), ("back", None)))
-            action = self.menu.choose(tr("proxies"), items, spacer_after_title=True, view_key="proxies")
-            if not action or action[0] == "back":
-                return
-            if action[0] == "create":
-                self.create_proxy_profile()
-            elif action[0] == "direct":
-                self.store.data["selected_proxy"] = None
-                self.store.save()
-            elif action[0] == "proxy":
-                self.proxy_detail(action[1])
 
-    def create_proxy_profile(self) -> None:
-        name = clean_markup(self.term.prompt(tr("proxy_name_prompt")))[:32]
-        if not name:
-            self.message(tr("invalid_name_title"), tr("invalid_proxy_name_body"), error=True)
-            return
-        if any(p["name"].lower() == name.lower() for p in self.store.data["proxy_profiles"]):
-            self.message(tr("proxy_exists_title"), tr("proxy_exists_body", name=name), error=True)
-            return
 
-        protocol = self.menu.choose(
-            tr("type_proxy"),
-            [
-                MenuItem("SOCKS5", "socks5"),
-                MenuItem("SOCKS4", "socks4"),
-                MenuItem(tr("back"), None),
-            ],
-        )
-        if protocol not in ("socks4", "socks5"):
-            return
-
-        host = self.term.prompt(tr("proxy_host_prompt")).strip()
-        if not valid_proxy_host(host):
-            self.message(tr("invalid_proxy_host_title"), tr("invalid_proxy_host_body"), error=True)
-            return
-        raw_port = self.term.prompt(tr("proxy_port_prompt"), "1080")
-        try:
-            port = int(raw_port)
-        except ValueError:
-            port = 0
-        if not 1 <= port <= 65535:
-            self.message(tr("invalid_proxy_port_title"), tr("invalid_proxy_port_body"), error=True)
-            return
-
-        profile = {
-            "id": uuid.uuid4().hex[:12],
-            "name": name,
-            "host": host,
-            "port": port,
-            "protocol": protocol,
-        }
-        profile["version"] = 4 if protocol == "socks4" else 5
-        self.store.data["proxy_profiles"].append(profile)
-        self.store.data["selected_proxy"] = profile["id"]
-        self.store.save()
-
-    def proxy_detail(self, profile_id: str) -> None:
-        while True:
-            profile = next((p for p in self.store.data["proxy_profiles"] if p.get("id") == profile_id), None)
-            if not profile:
-                return
-            current = self.store.data.get("selected_proxy") == profile_id
-            items: list[MenuItem] = []
-            if not current:
-                items.append(MenuItem(tr("select_launch"), "select"))
-            else:
-                items.append(MenuItem(tr("disable_proxy"), "disable"))
-            items.extend([MenuItem(tr("delete"), "delete"), MenuItem(tr("back"), "back")])
-            subtitle = f"{proxy_label(profile)} · {profile['host']}:{profile['port']}"
-            action = self.menu.choose(profile["name"], items, subtitle=subtitle)
-            if not action or action == "back":
-                return
-            if action == "select":
-                self.store.data["selected_proxy"] = profile_id
-                self.store.save()
-                return
-            if action == "disable":
-                self.store.data["selected_proxy"] = None
-                self.store.save()
-                return
-            if action == "delete":
-                if self.confirm(tr("delete_proxy_title"), tr("delete_proxy_body", name=profile["name"])):
-                    self.store.data["proxy_profiles"] = [p for p in self.store.data["proxy_profiles"] if p.get("id") != profile_id]
-                    if self.store.data.get("selected_proxy") == profile_id:
-                        self.store.data["selected_proxy"] = None
-                    self.store.save()
-                    return
 
                                                                              
 
@@ -840,6 +528,8 @@ class NullLauncher:
             if entry.installed:
                 if self.store.data.get("selected_version") != entry.installed_id:
                     items.append(MenuItem(tr("select_launch"), "select"))
+                favorite_key = "favorite_remove" if self.store.is_favorite_version(entry.installed_id) else "favorite_add"
+                items.append(MenuItem(tr(favorite_key), "favorite"))
                 items.append(MenuItem(tr("version_settings"), "settings"))
                 items.append(MenuItem(tr("delete"), "delete"))
             else:
@@ -855,6 +545,8 @@ class NullLauncher:
             if action == "install":
                 if self.install_version(entry):
                     return
+            elif action == "favorite":
+                self.store.toggle_favorite_version(entry.installed_id)
             elif action == "settings":
                 self.version_settings_screen(entry.installed_id)
             elif action == "delete":
@@ -919,6 +611,9 @@ class NullLauncher:
             self.store.data["version_settings"].pop(vid, None)
             if self.store.data.get("selected_version") == vid:
                 self.store.data["selected_version"] = None
+            self.store.data["favorite_versions"] = [item for item in self.store.favorite_versions() if item != vid]
+            if self.store.last_launch().get("version") == vid:
+                self.store.data["last_launch"] = {}
             self.store.save()
             self.data.refresh_installed(self.mll)
             return True
@@ -1212,7 +907,13 @@ class NullLauncher:
             return
         version_json = self.store.minecraft_dir / "versions" / version_id / f"{version_id}.json"
         if not version_json.exists():
+            # Do not leave stale Quick Play entries pointing at a deleted/moved version.
             self.store.data["selected_version"] = None
+            self.store.data["favorite_versions"] = [
+                item for item in self.store.favorite_versions() if item != version_id
+            ]
+            if self.store.last_launch().get("version") == version_id:
+                self.store.data["last_launch"] = {}
             self.store.save()
             self.message(tr("version_missing_title"), tr("version_missing_body", version=version_id), error=True)
             return
@@ -1266,6 +967,7 @@ class NullLauncher:
             finally:
                 log_file.close()
 
+            self.store.record_launch(version_id, account.get("name", ""))
             if self.store.settings["close_launcher_on_game_start"]:
                 self.running = False
                 return
@@ -1295,8 +997,13 @@ class NullLauncher:
 
             code = int(process.returncode or 0)
             if code != 0:
+                diagnostic_tail = tail_text(log_path, 100)
+                hints = diagnose_minecraft_crash(diagnostic_tail)
+                assistant = ""
+                if hints:
+                    assistant = "\n\n" + tr("crash_assistant_title") + ":\n" + "\n".join(f"• {tr(item.message_key)}" for item in hints)
                 tail = tail_text(log_path, 28)
-                details = f"{tr('exit_code')}: {code}\n\n{tr('last_log_lines')}:\n{tail or tr('empty_log')}"
+                details = f"{tr('exit_code')}: {code}{assistant}\n\n{tr('last_log_lines')}:\n{tail or tr('empty_log')}"
                 self.crash_screen(tr("game_crash_title"), details, log_path)
         except Exception as exc:
             self.log.exception("Launch failed")

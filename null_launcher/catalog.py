@@ -1,39 +1,12 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
-import ctypes
 import dataclasses
-import hashlib
 import html
-import io
-from html.parser import HTMLParser
-import json
 import logging
-from logging.handlers import RotatingFileHandler
-import os
-from pathlib import Path
-import platform
-import queue
 import re
-import shutil
-import signal
-import subprocess
-import sys
-import tempfile
-import textwrap
-import threading
-import time
-import uuid
-import unicodedata
-import webbrowser
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlencode, quote
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from .config import LANGUAGES, tr
 from .news import NEWS_LIMIT, _cached_news_is_fresh, fetch_official_minecraft_news, pretranslate_news_catalog
@@ -71,14 +44,14 @@ class LauncherData:
         return self.store.cache.get(key, default)
 
     def preload(self, mll: Any, progress: Callable[[int, int, str], None]) -> None:
-        """Load independent launcher data concurrently, then warm translations.
+        """Load independent launcher data concurrently, then warm current-language news.
 
-        Network-heavy catalog/news requests no longer wait for each other.  Once
-        the news list arrives, translations for every supported language are
-        generated in parallel and cached before the splash screen finishes.
+        Network-heavy catalog/news requests do not wait for each other. News
+        translation is cached only for the language selected for this run.
         """
-        translation_languages = [code for code in LANGUAGES if code != "en"]
-        total = 5 + len(translation_languages)                                               
+        selected_language = str(self.store.settings.get("language") or "en")
+        translation_languages = [selected_language] if selected_language in LANGUAGES and selected_language != "en" else []
+        total = 5 + len(translation_languages)
         step = 0
         progress(step, total, tr("preload_local"))
         self.store.minecraft_dir.mkdir(parents=True, exist_ok=True)
@@ -225,7 +198,7 @@ class LauncherData:
                 progress(step, total, f"{tr('loading_news')} · {language_name} · {done}/{count}")
 
             try:
-                updates = pretranslate_news_catalog(self.news, existing, translation_progress)
+                updates = pretranslate_news_catalog(self.news, existing, selected_language, translation_progress)
                 translation_root = self.store.cache.setdefault("news_translations", {})
                 if not isinstance(translation_root, dict):
                     translation_root = {}

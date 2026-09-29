@@ -1,44 +1,23 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
 import ctypes
-import dataclasses
 import hashlib
 import html
 import io
-from html.parser import HTMLParser
 import json
-import logging
-from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import platform
-import queue
 import re
-import shutil
-import signal
-import subprocess
 import sys
 import tempfile
-import textwrap
-import threading
 import time
 import uuid
 import unicodedata
-import webbrowser
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlencode, quote
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Optional
 
 from . import config as cfg
 from .config import ANSI_RE, APP_NAME, BIG_LOGO, BOLD, RESET, SMALL_LOGO
-
-                                                                             
 
 def _cell_width_char(ch: str) -> int:
     if not ch or unicodedata.combining(ch) or ch in {"\ufe0e", "\ufe0f", "\u200d"}:
@@ -346,11 +325,22 @@ def sixel_preview(
     return payload, occupied_cols, occupied_rows
 
 
+NEWS_IMAGE_MAX_PIXELS = 50_000_000
+NEWS_IMAGE_MAX_DIMENSION = 16_384
+
+
 def decode_article_image(raw: bytes) -> Any:
-    """Decode image bytes once; resize/filter happens only when the terminal changes."""
+    """Decode a news image while refusing decompression-bomb sized payloads."""
     from PIL import Image
 
     with Image.open(io.BytesIO(raw)) as opened:
+        width, height = map(int, opened.size)
+        if width <= 0 or height <= 0:
+            raise ValueError("Empty article image")
+        if width > NEWS_IMAGE_MAX_DIMENSION or height > NEWS_IMAGE_MAX_DIMENSION:
+            raise ValueError("Article image dimensions are too large")
+        if width * height > NEWS_IMAGE_MAX_PIXELS:
+            raise ValueError("Article image has too many pixels")
         opened.load()
         return opened.convert("RGB").copy()
 
@@ -375,7 +365,23 @@ def safe_int(value: Any, default: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, n))
 
 
+def launcher_home() -> Path:
+    """Directory containing the shipped launcher (or project root in source mode)."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[1]
+
+
+def portable_mode_enabled() -> bool:
+    return (launcher_home() / "portable.flag").is_file()
+
+
 def app_data_dir() -> Path:
+    override = os.environ.get("NULLLAUNCHER_DATA_DIR")
+    if override:
+        return Path(override).expanduser().resolve()
+    if portable_mode_enabled():
+        return launcher_home() / "data"
     if os.name == "nt":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
         return Path(base) / APP_NAME

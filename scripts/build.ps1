@@ -9,6 +9,8 @@ if (-not (Test-Path ".venv")) {
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 & $Python -m pip install --upgrade pip
 & $Python -m pip install -r requirements-dev.txt
+& $Python -m pip install --force-reinstall --no-deps --only-binary=:all: --require-hashes -r requirements-build.lock
+& $Python -m pytest -q
 & $Python scripts\sync_version_info.py
 & $Python -m PyInstaller --clean --noconfirm NullLauncher.spec
 & $Python scripts\verify_windows_build.py dist\NullLauncher.exe

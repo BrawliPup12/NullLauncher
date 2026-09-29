@@ -19,7 +19,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 import uuid
 
-from .config import APP_NAME, APP_VERSION, UPDATE_API_LATEST, UPDATE_MAX_BYTES, UPDATE_REPO_URL
+from .config import APP_NAME, APP_VERSION, UPDATE_API_LATEST, UPDATE_MAX_BYTES, UPDATE_REPO_URL, UPDATE_SIGNER_SUBJECT, UPDATE_SIGNER_THUMBPRINT
 from .download_cache import DownloadCache
 from .utils import clean_markup
 
@@ -185,6 +185,80 @@ def _recent_failed_update(version: str, *, max_age_seconds: int = FAILED_UPDATE_
     return False
 
 
+def _normalize_sha256_digest(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw.startswith("sha256:"):
+        raw = raw.split(":", 1)[1].strip()
+    return f"sha256:{raw}" if re.fullmatch(r"[0-9a-f]{64}", raw) else ""
+
+
+def _checksum_asset_digest(assets: list[Any], timeout: float) -> str:
+    for asset in assets:
+        if not isinstance(asset, dict):
+            continue
+        name = str(asset.get("name") or "").strip().lower()
+        if name not in {"nulllauncher.exe.sha256", "nulllauncher.sha256", "sha256sums.txt"}:
+            continue
+        url = str(asset.get("browser_download_url") or "")
+        if not url.startswith("https://"):
+            continue
+        request = Request(url, headers=_github_headers(binary=True))
+        with urlopen(request, timeout=timeout) as response:
+            text = response.read(16 * 1024).decode("utf-8", errors="replace")
+        if name == "sha256sums.txt":
+            # A multi-file checksum manifest must name the launcher explicitly;
+            # never accept an unrelated first hash from the file.
+            match = re.search(
+                r"(?im)^\s*([0-9a-f]{64})\s+[* ]?NullLauncher\.exe\s*$",
+                text,
+            )
+        else:
+            # Dedicated sidecars contain only the launcher checksum.
+            match = re.search(r"(?i)\b([0-9a-f]{64})\b", text)
+        if match:
+            return f"sha256:{match.group(1).lower()}"
+    return ""
+
+
+def _verify_authenticode_signature(path: Path) -> None:
+    """Enforce an exact Authenticode publisher identity when configured."""
+    expected_subject = str(UPDATE_SIGNER_SUBJECT or "").strip()
+    expected_thumbprint = re.sub(r"[^0-9A-Fa-f]", "", str(UPDATE_SIGNER_THUMBPRINT or "")).upper()
+    if not expected_subject and not expected_thumbprint:
+        return
+    if os.name != "nt":
+        raise RuntimeError("Authenticode verification is configured but Windows is unavailable")
+    escaped = str(path.resolve()).replace("'", "''")
+    script = (
+        f"$s=Get-AuthenticodeSignature -LiteralPath '{escaped}'; "
+        "$c=$s.SignerCertificate; "
+        "[pscustomobject]@{Status=[string]$s.Status;Subject=if($c){[string]$c.Subject}else{''};"
+        "Thumbprint=if($c){[string]$c.Thumbprint}else{''}} | ConvertTo-Json -Compress"
+    )
+    system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    powershell = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    if not powershell.is_file():
+        raise RuntimeError("Windows PowerShell is unavailable for Authenticode verification")
+    proc = subprocess.run(
+        [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        capture_output=True, text=True, timeout=20, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if proc.returncode != 0:
+        raise RuntimeError("Authenticode verification command failed")
+    try:
+        payload = json.loads(proc.stdout.strip())
+    except Exception as exc:
+        raise RuntimeError("Authenticode verification returned invalid data") from exc
+    if str(payload.get("Status") or "").casefold() != "valid":
+        raise RuntimeError("Update Authenticode signature is not valid")
+    actual_subject = str(payload.get("Subject") or "").strip()
+    actual_thumbprint = re.sub(r"[^0-9A-Fa-f]", "", str(payload.get("Thumbprint") or "")).upper()
+    if expected_subject and actual_subject != expected_subject:
+        raise RuntimeError("Update Authenticode publisher does not match the configured subject")
+    if expected_thumbprint and actual_thumbprint != expected_thumbprint:
+        raise RuntimeError("Update Authenticode certificate thumbprint does not match")
+
+
 def check_github_update(timeout: float = 4.5, *, allow_failed_retry: bool = False) -> Optional[UpdateInfo]:
     if not getattr(sys, "frozen", False):
         return None
@@ -226,13 +300,19 @@ def check_github_update(timeout: float = 4.5, *, allow_failed_retry: bool = Fals
     if selected is None or not str(selected.get("browser_download_url") or "").startswith("https://"):
         raise RuntimeError(f"Release {tag or version} has no NullLauncher.exe asset")
 
+    digest = _normalize_sha256_digest(selected.get("digest"))
+    if not digest:
+        digest = _checksum_asset_digest(candidates, timeout)
+    if not digest:
+        raise RuntimeError(f"Release {tag or version} has no trusted SHA-256 for NullLauncher.exe")
+
     notes = str(payload.get("body") or "").replace("\r\n", "\n").strip()[:12000]
     return UpdateInfo(
         version=version,
         tag=tag or f"v{version}",
         release_url=release_url,
         download_url=str(selected["browser_download_url"]),
-        digest=str(selected.get("digest") or ""),
+        digest=digest,
         source="asset",
         asset_name=str(selected.get("name") or "NullLauncher.exe"),
         notes=notes,
@@ -242,12 +322,13 @@ def check_github_update(timeout: float = 4.5, *, allow_failed_retry: bool = Fals
 def _validate_update_payload(raw: bytes, info: UpdateInfo) -> str:
     if not raw or len(raw) > UPDATE_MAX_BYTES:
         raise RuntimeError("Downloaded update has an invalid size")
-    digest = str(info.digest or "").strip().lower()
-    if digest.startswith("sha256:"):
-        expected = digest.split(":", 1)[1].strip()
-        actual = hashlib.sha256(raw).hexdigest()
-        if not expected or actual != expected:
-            raise RuntimeError("GitHub release SHA-256 verification failed")
+    digest = _normalize_sha256_digest(info.digest)
+    if not digest:
+        raise RuntimeError("Update has no valid SHA-256 digest; refusing to install")
+    expected = digest.split(":", 1)[1]
+    actual = hashlib.sha256(raw).hexdigest()
+    if actual != expected:
+        raise RuntimeError("GitHub release SHA-256 verification failed")
     if not raw.startswith(b"MZ"):
         raise RuntimeError("Downloaded update is not a Windows executable")
     if not _is_newer_version(info.version):
@@ -285,6 +366,7 @@ def download_github_update(info: UpdateInfo, target: Path, timeout: float = 30.0
             handle.flush()
             os.fsync(handle.fileno())
         _mark_hidden(tmp)
+        _verify_authenticode_signature(tmp)
         return tmp
     except Exception:
         with contextlib.suppress(FileNotFoundError):
@@ -410,6 +492,7 @@ def _install_downloaded_executable(source: Path, target: Path, expected_hash: st
     if actual != expected_hash.lower():
         staged.unlink(missing_ok=True)
         raise RuntimeError("Staged update hash mismatch")
+    _verify_authenticode_signature(staged)
 
     moved_old = False
     try:
@@ -420,6 +503,7 @@ def _install_downloaded_executable(source: Path, target: Path, expected_hash: st
         os.replace(staged, target)
         if _sha256_path(target) != expected_hash.lower():
             raise RuntimeError("Installed update hash mismatch")
+        _verify_authenticode_signature(target)
         return backup, staged
     except Exception:
         with contextlib.suppress(OSError):

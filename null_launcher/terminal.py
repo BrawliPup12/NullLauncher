@@ -1,47 +1,19 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
 import ctypes
 import dataclasses
-import hashlib
-import html
-import io
-from html.parser import HTMLParser
-import json
-import logging
-from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import platform
-import queue
 import re
 import shutil
-import signal
-import subprocess
 import sys
-import tempfile
-import textwrap
-import threading
 import time
-import uuid
-import unicodedata
-import webbrowser
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlencode, quote
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from . import config as cfg
 from .config import ANSI_RE, BOLD, DIM, RESET, WHITE, tr
 from .utils import _sixel_geometry, _tail_cells, brand_logo_lines, center_ansi, clean_markup, clip, sixel_preview, visible_len, wrap_plain
-
-                                                                             
-
-
 
 def centered_sixel_column(total_columns: int, occupied_columns: int) -> int:
     """1-based VT column that centers a raster footprint in the terminal grid."""

@@ -1,39 +1,19 @@
 from __future__ import annotations
 
-import argparse
 import contextlib
-import ctypes
-import dataclasses
 import hashlib
 import html
-import io
+import ipaddress
 from html.parser import HTMLParser
 import json
-import logging
-from logging.handlers import RotatingFileHandler
-import os
-from pathlib import Path
-import platform
-import queue
 import re
-import shutil
-import signal
-import subprocess
-import sys
-import tempfile
-import textwrap
-import threading
-import time
-import uuid
-import unicodedata
-import webbrowser
+import socket
 import xml.etree.ElementTree as ET
 from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlencode, quote
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from urllib.parse import unquote, urlencode, urljoin, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable, Optional
 
 from .config import tr
 
@@ -59,6 +39,29 @@ def localize_minecraft_article_url(url: str, locale: str) -> str:
         return url
     return re.sub(r"https://www\.minecraft\.net/[a-z]{2}(?:-[a-z]+)?/article/", f"https://www.minecraft.net/{locale}/article/", url, count=1, flags=re.I)
 MINECRAFT_NEWS_ARCHIVE_FEED = "https://mcbe.news/news/official/rss.xml"
+
+
+def _minecraft_article_identity_from_url(url: str) -> str:
+    """Return a locale-independent identity for a Minecraft.net article URL.
+
+    Minecraft publishes the same article below locale-prefixed paths such as
+    /en-us/article/foo and /ru-ru/article/foo.  Treating the whole URL as the
+    identity makes those translations appear as duplicate news items.
+    """
+    try:
+        parsed = urlsplit(html.unescape(str(url or "")).strip())
+    except Exception:
+        return ""
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host not in {"minecraft.net", "www.minecraft.net"}:
+        return ""
+    parts = [unquote(part).strip().casefold() for part in parsed.path.split("/") if part.strip()]
+    try:
+        article_index = parts.index("article")
+    except ValueError:
+        return ""
+    slug = "/".join(parts[article_index + 1:]).strip("/")
+    return f"minecraft-article:{slug}" if slug else ""
 
 
 class _LatestNewsLinksParser(HTMLParser):
@@ -156,15 +159,80 @@ def _download_text(url: str, timeout: float = 7.0) -> str:
     return raw.decode(charset, errors="replace")
 
 
+def _is_public_ip(value: str) -> bool:
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return bool(address.is_global)
+
+
+def _validate_news_asset_url(url: str, *, resolve_host: bool = True) -> str:
+    """Allow news images only from public HTTPS endpoints.
+
+    This is intentionally stricter than article/feed downloading because image
+    URLs come from page metadata and can otherwise turn redirects into an SSRF
+    path to localhost or a private network.
+    """
+    raw = str(url or "").strip()
+    try:
+        parsed = urlsplit(raw)
+    except Exception as exc:
+        raise RuntimeError("Invalid news image URL") from exc
+    if parsed.scheme.lower() != "https":
+        raise RuntimeError("News images must use HTTPS")
+    if parsed.username or parsed.password:
+        raise RuntimeError("News image URL must not contain credentials")
+    host = (parsed.hostname or "").strip().lower().rstrip(".")
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        raise RuntimeError("News image host is not allowed")
+
+    # Literal IP addresses are checked without DNS. Hostnames are resolved before
+    # connecting, and every returned address must be publicly routable.
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        if not literal.is_global:
+            raise RuntimeError("News image host resolves to a private address")
+    elif resolve_host:
+        try:
+            records = socket.getaddrinfo(host, parsed.port or 443, type=socket.SOCK_STREAM)
+        except OSError as exc:
+            raise RuntimeError("News image host could not be resolved") from exc
+        addresses = {str(record[4][0]).split("%", 1)[0] for record in records if record and record[4]}
+        if not addresses or any(not _is_public_ip(address) for address in addresses):
+            raise RuntimeError("News image host resolves to a private address")
+    return raw
+
+
+class _SafeNewsImageRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Any:
+        safe_url = _validate_news_asset_url(newurl, resolve_host=True)
+        return super().redirect_request(req, fp, code, msg, headers, safe_url)
+
+
 def _download_article_image_bytes(url: str, timeout: float = 8.0) -> bytes:
-    raw, _ = _download_bytes(
-        url,
-        timeout=timeout,
-        max_bytes=12 * 1024 * 1024,
-        accept="image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+    safe_url = _validate_news_asset_url(url, resolve_host=True)
+    req = Request(
+        safe_url,
+        headers={
+            "User-Agent": f"{APP_NAME}/{APP_VERSION} (+terminal launcher; Minecraft news reader)",
+            "Accept-Language": "en-US,en;q=0.8",
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
     )
+    opener = build_opener(_SafeNewsImageRedirectHandler())
+    with opener.open(req, timeout=timeout) as response:
+        final_url = _validate_news_asset_url(response.geturl(), resolve_host=False)
+        if not final_url:
+            raise RuntimeError("Invalid news image response")
+        raw = response.read(12 * 1024 * 1024 + 1)
     if not raw:
         raise RuntimeError(tr("empty_article_image"))
+    if len(raw) > 12 * 1024 * 1024:
+        raise RuntimeError("News image exceeds the 12 MiB limit")
     return raw
 
 
@@ -197,9 +265,10 @@ def _extract_latest_article_urls(document: str, limit: int = 20, *, include_all:
         url = urljoin(MINECRAFT_NEWS_SOURCE, html.unescape(href)).split("#", 1)[0].split("?", 1)[0]
         if not url.startswith("https://www.minecraft.net/") or "/article/" not in url:
             continue
-        if url in seen:
+        identity = _minecraft_article_identity_from_url(url) or url.lower()
+        if identity in seen:
             continue
-        seen.add(url)
+        seen.add(identity)
         out.append(url)
         if len(out) >= limit:
             break
@@ -435,38 +504,23 @@ def _translate_news_language_batches(
 def pretranslate_news_catalog(
     entries: list[dict[str, Any]],
     existing_cache: Any,
+    language: str,
     on_language_done: Optional[Callable[[int, int, str], None]] = None,
 ) -> dict[str, dict[str, Any]]:
-    """Pretranslate news into every supported UI language in parallel.
-
-    Only stale/missing cache entries hit the network.  Each language is handled
-    concurrently, while articles inside a language are packed into a handful of
-    batch requests.  The returned mapping is merged by the caller on one thread.
-    """
+    """Warm the translation cache only for the currently selected UI language."""
     root = existing_cache if isinstance(existing_cache, dict) else {}
-    languages = [code for code in LANGUAGES if code != "en"]
-    if not entries or not languages:
+    language = str(language or "en")
+    if not entries or language == "en" or language not in LANGUAGES:
         return {}
-    results: dict[str, dict[str, Any]] = {}
-    done = 0
-    workers = min(len(languages), 12)
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="NullTranslate") as pool:
-        futures = {}
-        for language in languages:
-            cached_language = root.get(language, {}) if isinstance(root.get(language, {}), dict) else {}
-            futures[pool.submit(_translate_news_language_batches, entries, language, cached_language)] = language
-        for future in as_completed(futures):
-            language = futures[future]
-            try:
-                updates = future.result()
-            except Exception:
-                updates = {}
-            results[language] = updates
-            done += 1
-            if on_language_done:
-                with contextlib.suppress(Exception):
-                    on_language_done(done, len(languages), language)
-    return results
+    cached_language = root.get(language, {}) if isinstance(root.get(language, {}), dict) else {}
+    try:
+        updates = _translate_news_language_batches(entries, language, cached_language)
+    except Exception:
+        updates = {}
+    if on_language_done:
+        with contextlib.suppress(Exception):
+            on_language_done(1, 1, language)
+    return {language: updates}
 
 def _rss_local_name(tag: str) -> str:
     return tag.rsplit("}", 1)[-1].lower()
@@ -539,9 +593,12 @@ def _fetch_archived_official_news(limit: int) -> list[dict[str, Any]]:
 
 
 def _news_identity(entry: dict[str, Any]) -> str:
-    url = str(entry.get("url") or "").split("?", 1)[0].rstrip("/").lower()
-    if url and "/article/" in url:
-        return "url:" + url
+    url = str(entry.get("url") or "").split("?", 1)[0].rstrip("/")
+    article_identity = _minecraft_article_identity_from_url(url)
+    if article_identity:
+        return article_identity
+    if url and "/article/" in url.lower():
+        return "url:" + url.lower()
     title = clean_markup(entry.get("title", "")).lower()
     return "title:" + re.sub(r"[^a-z0-9а-яё]+", " ", title).strip()
 

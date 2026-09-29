@@ -1,52 +1,23 @@
 from __future__ import annotations
 
-import argparse
-import contextlib
-import ctypes
-import dataclasses
-import hashlib
-import html
-import io
-from html.parser import HTMLParser
 import json
-import logging
-from logging.handlers import RotatingFileHandler
-import os
 from pathlib import Path
-import platform
-import queue
-import re
-import shutil
-import signal
-import subprocess
-import sys
-import tempfile
-import textwrap
-import threading
-import time
-import uuid
-import unicodedata
-import webbrowser
-import xml.etree.ElementTree as ET
-from email.utils import parsedate_to_datetime
-from urllib.parse import urljoin, urlencode, quote
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Optional
 
 from .config import DEFAULT_THEME, LANGUAGES, MC_NAME_RE, _parse_rgb
-from .utils import atomic_json_write, clean_markup, default_minecraft_dir, load_json, offline_uuid, proxy_protocol, recommended_ram_mb, safe_int, valid_proxy_host
+from .utils import atomic_json_write, clean_markup, default_minecraft_dir, load_json, now_iso, offline_uuid, proxy_protocol, recommended_ram_mb, safe_int, valid_proxy_host
 
                                                                              
 
 DEFAULT_STATE: dict[str, Any] = {
-    "schema": 5,
+    "schema": 6,
     "accounts": [],
     "selected_account": None,
     "proxy_profiles": [],
     "selected_proxy": None,
     "selected_version": None,
+    "favorite_versions": [],
+    "last_launch": {},
     "managed_versions": {},
     "version_settings": {},
     "settings": {
@@ -102,7 +73,7 @@ class StateStore:
 
     def _normalize(self) -> None:
         d = self.data
-        d["schema"] = 5
+        d["schema"] = 6
         if not isinstance(d.get("accounts"), list):
             d["accounts"] = []
         good_accounts = []
@@ -151,6 +122,26 @@ class StateStore:
         proxy_ids = {p["id"] for p in good_proxies}
         if d.get("selected_proxy") not in proxy_ids:
             d["selected_proxy"] = None
+
+        favorites = d.get("favorite_versions")
+        if not isinstance(favorites, list):
+            favorites = []
+        clean_favorites: list[str] = []
+        for value in favorites:
+            version = str(value or "").strip()[:200]
+            if version and version not in clean_favorites:
+                clean_favorites.append(version)
+            if len(clean_favorites) >= 3:
+                break
+        d["favorite_versions"] = clean_favorites
+
+        last_launch = d.get("last_launch")
+        if not isinstance(last_launch, dict):
+            last_launch = {}
+        version = str(last_launch.get("version") or "").strip()[:200]
+        account = str(last_launch.get("account") or "").strip()[:32]
+        launched_at = str(last_launch.get("launched_at") or "").strip()[:64]
+        d["last_launch"] = ({"version": version, "account": account, "launched_at": launched_at} if version else {})
 
         if not isinstance(d.get("managed_versions"), dict):
             d["managed_versions"] = {}
@@ -233,3 +224,37 @@ class StateStore:
         defaults["custom_resolution"] = bool(defaults["custom_resolution"])
         defaults["separate_game_dir"] = bool(defaults["separate_game_dir"])
         return defaults
+    def favorite_versions(self) -> list[str]:
+        return list(self.data.get("favorite_versions") or [])[:3]
+
+    def is_favorite_version(self, installed_id: str) -> bool:
+        return str(installed_id) in self.favorite_versions()
+
+    def toggle_favorite_version(self, installed_id: str) -> bool:
+        version = str(installed_id or "").strip()
+        if not version:
+            return False
+        favorites = self.favorite_versions()
+        if version in favorites:
+            favorites.remove(version)
+            enabled = False
+        else:
+            favorites = [version] + [item for item in favorites if item != version]
+            favorites = favorites[:3]
+            enabled = True
+        self.data["favorite_versions"] = favorites
+        self.save()
+        return enabled
+
+    def record_launch(self, installed_id: str, account_name: str = "") -> None:
+        self.data["last_launch"] = {
+            "version": str(installed_id or "").strip(),
+            "account": str(account_name or "").strip(),
+            "launched_at": now_iso(),
+        }
+        self.save()
+
+    def last_launch(self) -> dict[str, str]:
+        value = self.data.get("last_launch")
+        return dict(value) if isinstance(value, dict) else {}
+
