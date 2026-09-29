@@ -168,6 +168,26 @@ def _verify_custom_icon(exe: Path, ico: Path) -> None:
         user32.DestroyIcon(source)
 
 
+
+def _pe_subsystem(path: Path) -> int:
+    data = path.read_bytes()
+    if len(data) < 0x40 or data[:2] != b"MZ":
+        raise RuntimeError("Build is not a valid PE executable")
+    pe_offset = int.from_bytes(data[0x3C:0x40], "little")
+    if pe_offset + 24 + 70 > len(data) or data[pe_offset:pe_offset + 4] != b"PE\x00\x00":
+        raise RuntimeError("Build has an invalid PE header")
+    optional = pe_offset + 24
+    magic = int.from_bytes(data[optional:optional + 2], "little")
+    if magic not in (0x10B, 0x20B):
+        raise RuntimeError(f"Unsupported PE optional header magic: 0x{magic:04X}")
+    return int.from_bytes(data[optional + 68:optional + 70], "little")
+
+
+def _verify_windowed_subsystem(path: Path) -> None:
+    subsystem = _pe_subsystem(path)
+    if subsystem != 2:
+        raise RuntimeError(f"EXE is not a Windows GUI application (PE subsystem={subsystem})")
+
 def main() -> int:
     if os.name != "nt":
         print("Windows build verification skipped: not running on Windows")
@@ -181,7 +201,8 @@ def main() -> int:
     if actual_version != expected_version:
         raise SystemExit(f"Wrong EXE version resource: {actual_version}, expected {expected_version}")
     _verify_custom_icon(exe, ico)
-    print(f"Verified Windows metadata and custom icon: {exe.name} v{APP_VERSION}")
+    _verify_windowed_subsystem(exe)
+    print(f"Verified Windows GUI metadata and custom icon: {exe.name} v{APP_VERSION}")
     return 0
 
 

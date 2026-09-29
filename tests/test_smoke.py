@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.3"
+    assert APP_VERSION == "1.11.4"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -329,8 +329,8 @@ def test_windows_build_has_icon_and_version_metadata():
     assert "StringStruct('ProductName', 'NullLauncher')" in version_info
     assert "StringStruct('FileDescription', 'Terminal Minecraft Launcher')" in version_info
     assert "StringStruct('CompanyName', 'BrawliPup12')" in version_info
-    assert "StringStruct('FileVersion', '1.11.3.0')" in version_info
-    assert "StringStruct('ProductVersion', '1.11.3.0')" in version_info
+    assert "StringStruct('FileVersion', '1.11.4.0')" in version_info
+    assert "StringStruct('ProductVersion', '1.11.4.0')" in version_info
 
 
 def test_console_window_icon_is_applied_on_windows():
@@ -392,3 +392,32 @@ def test_frozen_restarts_reset_pyinstaller_environment():
     source = inspect.getsource(updater._independent_frozen_env)
     assert "PYINSTALLER_RESET_ENVIRONMENT" in source
     assert inspect.getsource(updater._launch_visible_launcher).count("_independent_frozen_env") == 1
+
+
+def test_project_metadata_matches_app_version():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'version = "1.11.4"' in pyproject
+
+
+def test_windows_build_uses_native_windowed_frontend():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    spec = (root / "NullLauncher.spec").read_text(encoding="utf-8")
+    cli = (root / "null_launcher" / "cli.py").read_text(encoding="utf-8")
+    gui = (root / "null_launcher" / "window_terminal.py").read_text(encoding="utf-8")
+    assert "console=False" in spec
+    assert "WindowTerminal" in cli
+    assert "root.title" in gui
+    assert "iconbitmap" in gui
+    assert "SetCurrentProcessExplicitAppUserModelID" in gui
+
+
+def test_windows_verifier_checks_gui_subsystem():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    verifier = (root / "scripts" / "verify_windows_build.py").read_text(encoding="utf-8")
+    assert "_verify_windowed_subsystem" in verifier
+    assert "subsystem != 2" in verifier
+

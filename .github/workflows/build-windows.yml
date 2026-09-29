@@ -49,7 +49,9 @@ jobs:
 
       - name: Smoke test
         shell: pwsh
-        run: .\dist\NullLauncher.exe --version
+        run: |
+          $process = Start-Process -FilePath .\dist\NullLauncher.exe -ArgumentList "--version" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NullLauncher.exe --version exited with code $($process.ExitCode)" }
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4

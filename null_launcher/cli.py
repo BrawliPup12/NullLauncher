@@ -73,7 +73,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             args.update_log,
         )
     if args.version:
-        print(f"{APP_NAME} {APP_VERSION}")
+        if sys.stdout is not None:
+            print(f"{APP_NAME} {APP_VERSION}")
         return 0
     if args.diagnose:
         base = app_data_dir()
@@ -103,7 +104,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         show_already_running(APP_NAME, tr("already_running"))
         return 0
 
-    term = Terminal(mouse_enabled=store.settings["mouse_enabled"])
+    if os.name == "nt" and getattr(sys, "frozen", False):
+        from .window_terminal import WindowTerminal
+        term = WindowTerminal(mouse_enabled=store.settings["mouse_enabled"])
+    else:
+        term = Terminal(mouse_enabled=store.settings["mouse_enabled"])
 
     def restore_on_signal(signum: int, frame: Any) -> None:
         term.restore()
@@ -121,15 +126,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 130
     except Exception as exc:
         logger.exception("Fatal error")
-        term.restore()
-        term.clear()
-        print(f"{RED}{BOLD}{tr('fatal')}{RESET}\n")
-        print(f"{type(exc).__name__}: {exc}\n")
-        print(f"{tr('log')}: {base / 'null_launcher.log'}")
-        try:
-            input("\n" + tr("press_enter"))
-        except Exception:
-            pass
+        message = f"{type(exc).__name__}: {exc}\n\n{tr('log')}: {base / 'null_launcher.log'}"
+        if hasattr(term, "show_fatal"):
+            term.show_fatal(tr("fatal"), message)
+        else:
+            term.restore()
+            term.clear()
+            print(f"{RED}{BOLD}{tr('fatal')}{RESET}\n")
+            print(message)
+            try:
+                input("\n" + tr("press_enter"))
+            except Exception:
+                pass
         return 1
     finally:
         term.restore()
