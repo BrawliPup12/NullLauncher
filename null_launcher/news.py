@@ -35,6 +35,8 @@ from urllib.error import HTTPError
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Iterable, Optional
 
+from .config import tr
+
 from .config import APP_NAME, APP_VERSION, LANGUAGES
 from .utils import clean_markup
 
@@ -162,7 +164,7 @@ def _download_article_image_bytes(url: str, timeout: float = 8.0) -> bytes:
         accept="image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
     )
     if not raw:
-        raise RuntimeError("Пустое изображение статьи")
+        raise RuntimeError(tr("empty_article_image"))
     return raw
 
 
@@ -634,7 +636,7 @@ def fetch_official_minecraft_news(limit: int = NEWS_LIMIT, locale: str = "en-us"
             break
 
     if not deduped:
-        raise RuntimeError("Не удалось получить свежие новости Minecraft") from last_error
+        raise RuntimeError(tr("news_refresh_failed")) from last_error
     return deduped
 
 def _cached_news_is_fresh(entries: Any, max_age_days: int = 180) -> bool:

@@ -55,7 +55,7 @@ def ensure_minecraft_library(term: Optional[Terminal] = None) -> Any:
         pass
 
     if getattr(sys, "frozen", False):
-        raise RuntimeError("Bundled minecraft-launcher-lib is missing or incompatible. Reinstall NullLauncher.exe.")
+        raise RuntimeError(tr("bundled_mll_missing"))
 
     if term:
         term.restore()
@@ -90,7 +90,7 @@ def ensure_image_library(term: Optional[Terminal] = None) -> Any:
         pass
 
     if getattr(sys, "frozen", False):
-        raise RuntimeError("Bundled Pillow is missing. Reinstall NullLauncher.exe.")
+        raise RuntimeError(tr("bundled_pillow_missing"))
 
     if term:
         term.restore()

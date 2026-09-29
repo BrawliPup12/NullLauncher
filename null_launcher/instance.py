@@ -7,6 +7,8 @@ from pathlib import Path
 import tempfile
 from typing import Optional
 
+from .config import tr
+
 
 class SingleInstanceGuard:
     def __init__(self, name: str):
@@ -58,7 +60,7 @@ class SingleInstanceGuard:
 
     def __enter__(self) -> "SingleInstanceGuard":
         if not self.acquire():
-            raise RuntimeError("Another instance is already running")
+            raise RuntimeError(tr("already_running"))
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:

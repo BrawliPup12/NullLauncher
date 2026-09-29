@@ -5,7 +5,7 @@ from null_launcher.updater import _validate_update_payload, UpdateInfo
 
 def test_identity():
     assert APP_NAME == "NullLauncher"
-    assert APP_VERSION == "1.11.1"
+    assert APP_VERSION == "1.11.2"
 
 
 def test_centered_sixel_column_is_symmetric():
@@ -259,3 +259,79 @@ def test_single_instance_guard_blocks_second_instance():
     finally:
         first.release()
         second.release()
+
+
+def test_every_language_has_complete_ui_catalog_and_splash():
+    from null_launcher.config import I18N, LANGUAGES, SPLASH_LINES
+
+    expected = set(I18N["en"])
+    for language in LANGUAGES:
+        assert set(I18N[language]) == expected
+        assert len(SPLASH_LINES.get(language, [])) >= 3
+
+
+def test_main_ui_has_no_hardcoded_cyrillic_outside_i18n():
+    from pathlib import Path
+    import re
+
+    project = Path(__file__).resolve().parents[1] / "null_launcher"
+    for name in ("app.py", "catalog.py", "cli.py", "minecraft.py", "terminal.py", "updater.py"):
+        source = (project / name).read_text(encoding="utf-8")
+        assert re.search(r"[А-Яа-яЁёІіЇїЄєЎў]", source) is None, name
+
+
+def test_interactive_ui_calls_do_not_use_literal_labels():
+    from pathlib import Path
+    import ast
+
+    source_path = Path(__file__).resolve().parents[1] / "null_launcher" / "app.py"
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    allowed_literals = {"", "1080", "SOCKS4", "SOCKS5"}
+    targets = {"prompt", "message", "confirm", "progress_task", "crash_screen"}
+    failures = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if isinstance(node.func, ast.Attribute):
+            name = node.func.attr
+        elif isinstance(node.func, ast.Name):
+            name = node.func.id
+        else:
+            name = ""
+        if name in targets:
+            for arg in node.args[:2]:
+                if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value not in allowed_literals:
+                    failures.append((node.lineno, name, arg.value))
+        if name == "MenuItem" and node.args:
+            arg = node.args[0]
+            if isinstance(arg, ast.Constant) and isinstance(arg.value, str) and arg.value not in allowed_literals:
+                failures.append((node.lineno, name, arg.value))
+    assert not failures
+
+
+def test_windows_build_has_icon_and_version_metadata():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    spec = (root / "NullLauncher.spec").read_text(encoding="utf-8")
+    version_info = (root / "assets" / "version_info.txt").read_text(encoding="utf-8")
+    assert (root / "assets" / "NullLauncher.ico").is_file()
+    assert 'icon="assets/NullLauncher.ico"' in spec
+    assert 'version="assets/version_info.txt"' in spec
+    assert "StringStruct('ProductName', 'NullLauncher')" in version_info
+    assert "StringStruct('FileDescription', 'Terminal Minecraft Launcher')" in version_info
+    assert "StringStruct('CompanyName', 'BrawliPup12')" in version_info
+    assert "StringStruct('FileVersion', '1.11.2.0')" in version_info
+    assert "StringStruct('ProductVersion', '1.11.2.0')" in version_info
+
+
+def test_console_window_icon_is_applied_on_windows():
+    import inspect
+    from null_launcher.terminal import Terminal
+
+    source = inspect.getsource(Terminal._apply_window_icon)
+    assert "GetConsoleWindow" in source
+    assert "LoadImageW" in source
+    assert "SendMessageW" in source
+    assert "NullLauncher.ico" in source

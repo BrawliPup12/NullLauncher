@@ -485,7 +485,7 @@ class NullLauncher:
         language = str(self.store.settings.get("language") or "en")
         entry = self._localized_news_entry(base_entry) if language != "en" else dict(base_entry)
 
-        title = self._news_field(entry, "title") or "Minecraft News"
+        title = self._news_field(entry, "title") or tr("news")
         body = self._news_field(entry, "text", "description", "summary", "excerpt")
         category = self._news_field(entry, "category", "tag", "type")
         date = self._news_field(entry, "date", "publishDate", "published", "publishedAt")
@@ -541,7 +541,7 @@ class NullLauncher:
             if not action or action == "back": return
             if action == "open" and url:
                 try:
-                    if not webbrowser.open(url): raise RuntimeError("The system did not confirm opening the browser")
+                    if not webbrowser.open(url): raise RuntimeError(tr("browser_open_failed"))
                 except Exception as exc:
                     self.message(tr("browser"), f"{exc}\n\n{url}", error=True)
 
@@ -658,12 +658,12 @@ class NullLauncher:
                 self.account_detail(action[1])
 
     def create_account(self) -> None:
-        name = self.term.prompt("Имя offline-аккаунта (3–16 символов: A-Z, 0-9, _)")
+        name = self.term.prompt(tr("account_name_prompt"))
         if not MC_NAME_RE.fullmatch(name):
-            self.message("Некорректное имя", "Имя должно содержать 3–16 латинских букв, цифр или символ _. ", error=True)
+            self.message(tr("invalid_name_title"), tr("invalid_account_name_body"), error=True)
             return
         if any(a["name"].lower() == name.lower() for a in self.store.data["accounts"]):
-            self.message("Аккаунт уже есть", f"Профиль {name} уже создан.", error=True)
+            self.message(tr("account_exists_title"), tr("account_exists_body", name=name), error=True)
             return
         account = {"name": name, "uuid": offline_uuid(name), "type": "offline"}
         self.store.data["accounts"].append(account)
@@ -677,7 +677,7 @@ class NullLauncher:
             if not current:
                 items.append(MenuItem(tr("select_launch"), "select"))
             items.extend([MenuItem(tr("delete"), "delete"), MenuItem(tr("back"), "back")])
-            action = self.menu.choose(name, items, subtitle=f"Offline UUID: {offline_uuid(name)}")
+            action = self.menu.choose(name, items, subtitle=f"{tr('offline_uuid_label')}: {offline_uuid(name)}")
             if not action or action == "back":
                 return
             if action == "select":
@@ -685,7 +685,7 @@ class NullLauncher:
                 self.store.save()
                 return
             if action == "delete":
-                if self.confirm("Удалить аккаунт", f"Удалить offline-профиль {name}?"):
+                if self.confirm(tr("delete_account_title"), tr("delete_account_body", name=name)):
                     self.store.data["accounts"] = [a for a in self.store.data["accounts"] if a["name"] != name]
                     if self.store.data.get("selected_account") == name:
                         self.store.data["selected_account"] = self.store.data["accounts"][0]["name"] if self.store.data["accounts"] else None
@@ -721,12 +721,12 @@ class NullLauncher:
                 self.proxy_detail(action[1])
 
     def create_proxy_profile(self) -> None:
-        name = clean_markup(self.term.prompt("Название прокси-профиля"))[:32]
+        name = clean_markup(self.term.prompt(tr("proxy_name_prompt")))[:32]
         if not name:
-            self.message("Некорректное имя", "Введите название прокси-профиля.", error=True)
+            self.message(tr("invalid_name_title"), tr("invalid_proxy_name_body"), error=True)
             return
         if any(p["name"].lower() == name.lower() for p in self.store.data["proxy_profiles"]):
-            self.message("Профиль уже есть", f"Прокси-профиль {name} уже существует.", error=True)
+            self.message(tr("proxy_exists_title"), tr("proxy_exists_body", name=name), error=True)
             return
 
         protocol = self.menu.choose(
@@ -734,23 +734,23 @@ class NullLauncher:
             [
                 MenuItem("SOCKS5", "socks5"),
                 MenuItem("SOCKS4", "socks4"),
-                MenuItem("Назад", None),
+                MenuItem(tr("back"), None),
             ],
         )
         if protocol not in ("socks4", "socks5"):
             return
 
-        host = self.term.prompt("Хост или IP прокси").strip()
+        host = self.term.prompt(tr("proxy_host_prompt")).strip()
         if not valid_proxy_host(host):
-            self.message("Некорректный хост", "Используйте hostname, IPv4 или IPv6 без пробелов.", error=True)
+            self.message(tr("invalid_proxy_host_title"), tr("invalid_proxy_host_body"), error=True)
             return
-        raw_port = self.term.prompt("Порт прокси", "1080")
+        raw_port = self.term.prompt(tr("proxy_port_prompt"), "1080")
         try:
             port = int(raw_port)
         except ValueError:
             port = 0
         if not 1 <= port <= 65535:
-            self.message("Некорректный порт", "Порт должен быть числом от 1 до 65535.", error=True)
+            self.message(tr("invalid_proxy_port_title"), tr("invalid_proxy_port_body"), error=True)
             return
 
         profile = {
@@ -790,7 +790,7 @@ class NullLauncher:
                 self.store.save()
                 return
             if action == "delete":
-                if self.confirm("Удалить прокси", f"Удалить прокси-профиль {profile['name']}?"):
+                if self.confirm(tr("delete_proxy_title"), tr("delete_proxy_body", name=profile["name"])):
                     self.store.data["proxy_profiles"] = [p for p in self.store.data["proxy_profiles"] if p.get("id") != profile_id]
                     if self.store.data.get("selected_proxy") == profile_id:
                         self.store.data["selected_proxy"] = None
@@ -862,9 +862,8 @@ class NullLauncher:
     def install_version(self, entry: VersionEntry) -> bool:
         if entry.loader_id == "forge":
             if not self.confirm(
-                "Установка Forge",
-                "Разработчики Forge просят не автоматизировать установку без поддержки проекта, "
-                "поскольку проект финансируется рекламой на странице загрузки. Продолжить автоматическую установку?",
+                tr("forge_install_title"),
+                tr("forge_install_warning"),
             ):
                 return False
         mc_dir = str(self.store.minecraft_dir)
@@ -879,9 +878,9 @@ class NullLauncher:
                     java = self.store.settings.get("custom_java_path") or None
                     return str(loader.install(entry.mc_version, mc_dir, callback=cb, java=java))
             else:
-                self.message("Нельзя скачать", "Локальная версия уже должна существовать на диске.", error=True)
+                self.message(tr("cannot_download_title"), tr("local_version_required"), error=True)
                 return False
-            installed_id = str(self.progress_task(f"Установка {entry.label}", task))
+            installed_id = str(self.progress_task(tr("installing_version", version=entry.label), task))
             self.store.data["managed_versions"][entry.key] = {
                 "kind": entry.kind,
                 "loader_id": entry.loader_id,
@@ -892,24 +891,24 @@ class NullLauncher:
             self.store.data["selected_version"] = installed_id
             self.store.save()
             self.data.refresh_installed(self.mll)
-            self.message("Установка завершена", f"{entry.label} установлена как {installed_id} и выбрана для запуска.")
+            self.message(tr("install_complete_title"), tr("install_complete_body", label=entry.label, installed_id=installed_id))
             return True
         except Exception as exc:
             self.log.exception("Install failed: %s", entry.key)
-            self.message("Ошибка установки", f"{type(exc).__name__}: {exc}\n\nПодробности записаны в null_launcher.log.", error=True)
+            self.message(tr("install_error_title"), f"{type(exc).__name__}: {exc}\n\n{tr('details_in_log')}", error=True)
             return False
 
     def delete_version(self, entry: VersionEntry) -> bool:
         vid = entry.installed_id
         if not vid:
             return False
-        if not self.confirm("Удалить версию", f"Удалить профиль версии {vid}? Общие assets/libraries останутся на месте."):
+        if not self.confirm(tr("delete_version_title"), tr("delete_version_body", version=vid)):
             return False
         versions_root = (self.store.minecraft_dir / "versions").resolve()
         target = (versions_root / vid).resolve()
         try:
             if target.parent != versions_root:
-                raise RuntimeError("Небезопасный путь версии")
+                raise RuntimeError(tr("unsafe_version_path"))
             if target.exists():
                 shutil.rmtree(target)
             for key, item in list(self.store.data["managed_versions"].items()):
@@ -923,7 +922,7 @@ class NullLauncher:
             return True
         except Exception as exc:
             self.log.exception("Delete failed: %s", vid)
-            self.message("Не удалось удалить", str(exc), error=True)
+            self.message(tr("delete_failed_title"), str(exc), error=True)
             return False
 
     def version_settings_screen(self, installed_id: str) -> None:
@@ -951,8 +950,8 @@ class NullLauncher:
                 if cfg["max_ram_mb"] < cfg["min_ram_mb"]: cfg["max_ram_mb"] = cfg["min_ram_mb"]
             elif action == "resolution_toggle": cfg["custom_resolution"] = not cfg["custom_resolution"]
             elif action == "resolution":
-                w = self.term.prompt(tr("window_size") + " · width", str(cfg["resolution_width"]))
-                h = self.term.prompt(tr("window_size") + " · height", str(cfg["resolution_height"]))
+                w = self.term.prompt(tr("window_size") + " · " + tr("width_label"), str(cfg["resolution_width"]))
+                h = self.term.prompt(tr("window_size") + " · " + tr("height_label"), str(cfg["resolution_height"]))
                 cfg["resolution_width"] = safe_int(w, 1280, 320, 16384); cfg["resolution_height"] = safe_int(h, 720, 240, 16384)
             elif action == "separate": cfg["separate_game_dir"] = not cfg["separate_game_dir"]
             elif action == "reset":
@@ -991,7 +990,7 @@ class NullLauncher:
                 new = self.term.prompt(tr("minecraft_dir"), s["minecraft_dir"]); path = Path(new).expanduser()
                 try:
                     path.mkdir(parents=True, exist_ok=True); s["minecraft_dir"] = str(path); self.store.save(); self.data.refresh_installed(self.mll)
-                except OSError as exc: self.message("Path unavailable", str(exc), error=True)
+                except OSError as exc: self.message(tr("path_unavailable_title"), str(exc), error=True)
             elif action in ("snapshots", "old_versions", "news", "mouse", "repair", "close", "auto_update"):
                 key = {"snapshots":"show_snapshots","old_versions":"show_old_versions","news":"news_enabled","mouse":"mouse_enabled","repair":"repair_before_launch","close":"close_launcher_on_game_start","auto_update":"auto_update"}[action]
                 s[key] = not s[key]; self.store.save()
@@ -1003,8 +1002,8 @@ class NullLauncher:
                 if s["default_max_ram_mb"] < s["default_min_ram_mb"]: s["default_max_ram_mb"] = s["default_min_ram_mb"]
                 self.store.save()
             elif action == "java":
-                new = self.term.prompt(tr("java_manual") + " (use - for auto)", s["custom_java_path"]); new = "" if new == "-" else new
-                if new and not Path(new).expanduser().exists(): self.message("Java not found", "Choose an existing java/javaw executable or '-' for automatic Mojang runtime.", error=True)
+                new = self.term.prompt(tr("java_manual") + " (" + tr("use_dash_for_auto") + ")", s["custom_java_path"]); new = "" if new == "-" else new
+                if new and not Path(new).expanduser().exists(): self.message(tr("java_not_found_title"), tr("java_not_found_body"), error=True)
                 else: s["custom_java_path"] = str(Path(new).expanduser()) if new else ""; self.store.save()
             elif action == "language":
                 current = s.get("language", "en")
@@ -1019,7 +1018,7 @@ class NullLauncher:
                 normalized = normalize_user_color(self.term.prompt(tr("color_prompt"), s[key]))
                 if normalized:
                     s[key] = normalized; self.store.save(); apply_runtime_preferences(s); self.term._last_frame = []; self.term._last_graphic_key = None; self.term._sixel_cache.clear()
-                else: self.message("Color", tr("color_error"), error=True)
+                else: self.message(tr("color_title"), tr("color_error"), error=True)
             elif action == "clear_cache":
                 self.download_cache.clear()
                 clear_update_download_cache()
@@ -1032,7 +1031,7 @@ class NullLauncher:
                     if os.name == "nt": os.startfile(str(self.store.base))                              
                     elif sys.platform == "darwin": subprocess.Popen(["open", str(self.store.base)])
                     else: subprocess.Popen(["xdg-open", str(self.store.base)])
-                except Exception as exc: self.message("Open folder", str(exc), error=True)
+                except Exception as exc: self.message(tr("open_folder_title"), str(exc), error=True)
             elif action == "reset":
                 if self.confirm(tr("reset_defaults"), tr("reset_confirm")):
                     self.store.reset_launcher_settings(); apply_runtime_preferences(self.store.settings); self.term._last_frame = []; self.term._last_graphic_key = None; self.term._sixel_cache.clear()

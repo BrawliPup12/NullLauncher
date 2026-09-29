@@ -88,7 +88,7 @@ class LauncherData:
         except Exception as exc:
             self.log.exception("get_installed_versions failed")
             self.installed = []
-            self.network_errors.append(f"Локальные версии: {exc}")
+            self.network_errors.append(tr("local_versions_error", error=exc))
         step += 1
 
         cached_vanilla = self._cache_get("vanilla", [])
@@ -123,7 +123,7 @@ class LauncherData:
                 return versions, str(latest.get("release", "")), None, True
             except Exception as exc:
                 self.log.warning("Vanilla list network error: %s", exc)
-                message = "Vanilla: офлайн-кэш" if cached_vanilla else "Vanilla: недоступно"
+                message = f"Vanilla: {tr('offline_cache')}" if cached_vanilla else f"Vanilla: {tr('unavailable')}"
                 return list(cached_vanilla) if isinstance(cached_vanilla, list) else [], cached_latest, message, False
 
         def load_loaders() -> tuple[dict[str, list[str]], list[str], bool]:
@@ -148,7 +148,7 @@ class LauncherData:
                         self.log.warning("Loader %s list failed: %s", lid, exc)
                         cached = cached_loaders.get(lid, []) if isinstance(cached_loaders, dict) else []
                         results[lid] = list(cached) if isinstance(cached, list) else []
-                        errors.append(f"{lid}: офлайн-кэш" if cached else f"{lid}: недоступно")
+                        errors.append(f"{lid}: {tr('offline_cache')}" if cached else f"{lid}: {tr('unavailable')}")
             return results, errors, True
 
         def load_news() -> tuple[list[dict[str, Any]], Optional[str], bool]:
@@ -163,7 +163,7 @@ class LauncherData:
                 self.log.warning("Official Minecraft news failed: %s", exc)
                 fallback = cached_news if _cached_news_is_fresh(cached_news) else []
                 return list(fallback) if isinstance(fallback, list) else [], (
-                    "Новости: свежий офлайн-кэш" if fallback else "Новости: недоступны"
+                    f"{tr('news_status')}: {tr('fresh_offline_cache')}" if fallback else f"{tr('news_status')}: {tr('unavailable')}"
                 ), False
 
         combined_status = " · ".join((tr("preload_vanilla"), tr("preload_loaders"), tr("preload_news")))

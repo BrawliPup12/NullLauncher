@@ -28,6 +28,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
 
+      - name: Sync Windows metadata
+        shell: pwsh
+        run: python scripts/sync_version_info.py
+
       - name: Build NullLauncher.exe
         shell: pwsh
         run: python -m PyInstaller --clean --noconfirm NullLauncher.spec

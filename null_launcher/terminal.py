@@ -77,6 +77,7 @@ class Terminal:
         self._cell_px_grid: Optional[tuple[int, int]] = None
         self._cell_px_exact = False
         self._sixel_support_cache: Optional[bool] = None
+        self._window_icon_handles: list[int] = []
         self._init_console()
 
     def _init_console(self) -> None:
@@ -104,8 +105,39 @@ class Terminal:
                     kernel32.SetConsoleMode(self.hout, out_mode.value | 0x0004)                 
             except Exception:
                 self._win = False
+        self._apply_window_icon()
         self._request_initial_geometry()
         print("\x1b[?25l", end="", flush=True)
+
+    def _apply_window_icon(self) -> None:
+        if not self._win or self._window_icon_handles:
+            return
+        try:
+            roots = []
+            bundle_root = getattr(sys, "_MEIPASS", "")
+            if bundle_root:
+                roots.append(Path(bundle_root))
+            roots.append(Path(__file__).resolve().parents[1])
+            icon_path = next((root / "assets" / "NullLauncher.ico" for root in roots if (root / "assets" / "NullLauncher.ico").is_file()), None)
+            if icon_path is None:
+                return
+            kernel32 = ctypes.windll.kernel32
+            user32 = ctypes.windll.user32
+            kernel32.GetConsoleWindow.restype = ctypes.c_void_p
+            hwnd = kernel32.GetConsoleWindow()
+            if not hwnd:
+                return
+            user32.LoadImageW.restype = ctypes.c_void_p
+            user32.LoadImageW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+            user32.SendMessageW.restype = ctypes.c_ssize_t
+            user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_ssize_t]
+            for kind, size in ((1, 32), (0, 16)):
+                handle = user32.LoadImageW(None, str(icon_path), 1, size, size, 0x0010)
+                if handle:
+                    user32.SendMessageW(hwnd, 0x0080, kind, int(handle))
+                    self._window_icon_handles.append(int(handle))
+        except Exception:
+            pass
 
     def _request_initial_geometry(self) -> None:
         """Ask Windows Terminal for a sane first-launch size without fighting later resizes."""

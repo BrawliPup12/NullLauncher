@@ -73,6 +73,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"{APP_NAME} {APP_VERSION}")
         return 0
     if args.diagnose:
+        base = app_data_dir()
+        try:
+            diag_store = StateStore(base)
+            apply_runtime_preferences(diag_store.settings)
+        except Exception:
+            pass
         return diagnose()
     if sys.version_info < MIN_PYTHON:
         print(tr("python_required", app=APP_NAME, major=MIN_PYTHON[0], minor=MIN_PYTHON[1]), file=sys.stderr)
@@ -116,7 +122,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"{type(exc).__name__}: {exc}\n")
         print(f"{tr('log')}: {base / 'null_launcher.log'}")
         try:
-            input("\nEnter...")
+            input("\n" + tr("press_enter"))
         except Exception:
             pass
         return 1

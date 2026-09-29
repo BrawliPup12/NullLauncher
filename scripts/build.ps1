@@ -9,6 +9,7 @@ if (-not (Test-Path ".venv")) {
 $Python = Join-Path $Root ".venv\Scripts\python.exe"
 & $Python -m pip install --upgrade pip
 & $Python -m pip install -r requirements-dev.txt
+& $Python scripts\sync_version_info.py
 & $Python -m PyInstaller --clean --noconfirm NullLauncher.spec
 
 Write-Host ""

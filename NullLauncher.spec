@@ -7,7 +7,7 @@ analysis = Analysis(
     ["NullLauncher.py"],
     pathex=["."],
     binaries=mll_binaries,
-    datas=mll_datas,
+    datas=mll_datas + [("assets/NullLauncher.ico", "assets")],
     hiddenimports=mll_hidden,
     hookspath=[],
     hooksconfig={},
@@ -34,4 +34,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="assets/NullLauncher.ico",
+    version="assets/version_info.txt",
 )
