@@ -10,6 +10,25 @@ def test_identity():
     assert re.fullmatch(r"\d+\.\d+\.\d+", APP_VERSION)
 
 
+def test_message_is_bound_instance_method_and_accepts_title_text():
+    from null_launcher.app import NullLauncher
+
+    captured = {}
+
+    class DummyMenu:
+        def choose(self, title, items, **kwargs):
+            captured["title"] = title
+            captured["subtitle"] = kwargs.get("subtitle")
+            return "back"
+
+    launcher = object.__new__(NullLauncher)
+    launcher.menu = DummyMenu()
+    launcher.message("Install complete", "Minecraft 1.21.3 is ready")
+
+    assert "Install complete" in captured["title"]
+    assert captured["subtitle"] == "Minecraft 1.21.3 is ready"
+
+
 def test_centered_sixel_column_is_symmetric():
     total = 111
     occupied = 47

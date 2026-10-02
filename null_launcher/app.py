@@ -377,16 +377,6 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
 
                                                                              
 
-    @staticmethod
-
-
-
-
-
-
-
-                                                                            
-
     def message(self, title: str, text: str, *, error: bool = False) -> None:
         items = [MenuItem(tr("back"), "back")]
         color = RED if error else cfg.PRIMARY_COLOR
