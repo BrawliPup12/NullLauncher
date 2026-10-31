@@ -140,6 +140,9 @@ def _download_bytes(
     max_bytes: int = 6 * 1024 * 1024,
     accept: str = "text/html,application/xhtml+xml,application/rss+xml,application/xml;q=0.9,*/*;q=0.5",
 ) -> tuple[bytes, str]:
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(f"Unsupported URL scheme: {parsed.scheme}")
     req = Request(
         url,
         headers={

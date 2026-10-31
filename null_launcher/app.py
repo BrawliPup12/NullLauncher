@@ -122,11 +122,11 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
 
         self.term.clear()
         render_splash(animate=True)
-        preload_thread = threading.Thread(target=preload_worker, name="NullPreloadUI", daemon=False)
+        preload_thread = threading.Thread(target=preload_worker, name="NullPreloadUI", daemon=True)
         preload_thread.start()
         update_thread: Optional[threading.Thread] = None
         if auto_update_enabled:
-            update_thread = threading.Thread(target=update_worker, name="NullUpdate", daemon=False)
+            update_thread = threading.Thread(target=update_worker, name="NullUpdate", daemon=True)
             update_thread.start()
 
         last_signature: Optional[tuple[Any, ...]] = None
@@ -248,13 +248,15 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             s["language"] = selected_language
             apply_runtime_preferences(s)
 
-        raw_path = self.term.prompt(tr("first_run_minecraft_dir"), s["minecraft_dir"])
-        path = Path(raw_path).expanduser()
-        try:
-            path.mkdir(parents=True, exist_ok=True)
-            s["minecraft_dir"] = str(path)
-        except OSError:
-            pass
+        raw_path = self.term.prompt(tr("first_run_minecraft_dir"), s["minecraft_dir"]).strip()
+        if raw_path:
+            path = Path(raw_path).expanduser()
+            if path.is_absolute():
+                try:
+                    path.mkdir(parents=True, exist_ok=True)
+                    s["minecraft_dir"] = str(path)
+                except OSError:
+                    pass
 
         min_ram = safe_int(self.term.prompt(tr("first_run_ram_min"), str(s["default_min_ram_mb"])), s["default_min_ram_mb"], 256, 65536)
         max_ram = safe_int(self.term.prompt(tr("first_run_ram_max"), str(s["default_max_ram_mb"])), s["default_max_ram_mb"], 512, 131072)
@@ -348,6 +350,7 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
                     self._open_path(log.parent)
             except Exception as exc:
                 self.log.warning("Could not open crash log: %s", exc)
+                self.message(tr("open_folder_title"), str(exc), error=True)
 
     def manual_update_check(self) -> None:
         """Check GitHub Releases on demand; install a newer release immediately."""
@@ -417,7 +420,7 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             finally:
                 q.put(("done", True))
 
-        thread = threading.Thread(target=worker, name="NullTask", daemon=False)
+        thread = threading.Thread(target=worker, name="NullTask", daemon=True)
         thread.start()
         self.term._view_key = "progress:" + clean_markup(title)
         first_frame = True
@@ -508,11 +511,12 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
                 self.data.refresh_installed(self.mll)
 
     def version_detail(self, entry: VersionEntry) -> None:
+        need_refresh = False
         while True:
-                                                         
-            catalog = self.data.build_catalog("all", "")
-            refreshed = next((e for e in catalog if e.key == entry.key or (entry.installed_id and e.installed_id == entry.installed_id)), entry)
-            entry = refreshed
+            if need_refresh:
+                catalog = self.data.build_catalog("all", "")
+                entry = next((e for e in catalog if e.key == entry.key or (entry.installed_id and e.installed_id == entry.installed_id)), entry)
+                need_refresh = False
             subtitle = f"{tr('source')}: {entry.loader_id or entry.kind} · Minecraft: {entry.mc_version}"
             items: list[MenuItem] = []
             if entry.installed:
@@ -595,6 +599,10 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
                 raise RuntimeError(tr("unsafe_version_path"))
             if target.exists():
                 shutil.rmtree(target)
+            instance_dir = (self.store.base / "instances" / slug(vid)).resolve()
+            if instance_dir.exists() and instance_dir.parent == (self.store.base / "instances").resolve():
+                with contextlib.suppress(OSError):
+                    shutil.rmtree(instance_dir)
             for key, item in list(self.store.data["managed_versions"].items()):
                 if isinstance(item, dict) and item.get("installed_id") == vid:
                     self.store.data["managed_versions"].pop(key, None)
@@ -639,7 +647,8 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             elif action == "resolution":
                 w = self.term.prompt(tr("window_size") + " · " + tr("width_label"), str(cfg["resolution_width"]))
                 h = self.term.prompt(tr("window_size") + " · " + tr("height_label"), str(cfg["resolution_height"]))
-                cfg["resolution_width"] = safe_int(w, 1280, 320, 16384); cfg["resolution_height"] = safe_int(h, 720, 240, 16384)
+                cfg["resolution_width"] = safe_int(w, cfg["resolution_width"], 320, 16384)
+                cfg["resolution_height"] = safe_int(h, cfg["resolution_height"], 240, 16384)
             elif action == "separate": cfg["separate_game_dir"] = not cfg["separate_game_dir"]
             elif action == "reset":
                 if self.confirm(tr("reset_defaults"), tr("version_reset_confirm")): self.store.reset_version_settings(installed_id)
@@ -674,10 +683,19 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             action = self.menu.choose(tr("settings"), items, spacer_after_title=True, view_key="launcher-settings")
             if not action or action == "back": return
             if action == "mc_dir":
-                new = self.term.prompt(tr("minecraft_dir"), s["minecraft_dir"]); path = Path(new).expanduser()
-                try:
-                    path.mkdir(parents=True, exist_ok=True); s["minecraft_dir"] = str(path); self.store.save(); self.data.refresh_installed(self.mll)
-                except OSError as exc: self.message(tr("path_unavailable_title"), str(exc), error=True)
+                new = self.term.prompt(tr("minecraft_dir"), s["minecraft_dir"]).strip()
+                if new:
+                    path = Path(new).expanduser()
+                    if path.is_file():
+                        self.message(tr("path_unavailable_title"), tr("path_unavailable_title"), error=True)
+                    else:
+                        try:
+                            path.mkdir(parents=True, exist_ok=True)
+                            s["minecraft_dir"] = str(path.resolve())
+                            self.store.save()
+                            self.data.refresh_installed(self.mll)
+                        except OSError as exc:
+                            self.message(tr("path_unavailable_title"), str(exc), error=True)
             elif action in ("snapshots", "old_versions", "news", "mouse", "repair", "close", "auto_update"):
                 key = {"snapshots":"show_snapshots","old_versions":"show_old_versions","news":"news_enabled","mouse":"mouse_enabled","repair":"repair_before_launch","close":"close_launcher_on_game_start","auto_update":"auto_update"}[action]
                 s[key] = not s[key]; self.store.save()
@@ -689,9 +707,18 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
                 if s["default_max_ram_mb"] < s["default_min_ram_mb"]: s["default_max_ram_mb"] = s["default_min_ram_mb"]
                 self.store.save()
             elif action == "java":
-                new = self.term.prompt(tr("java_manual") + " (" + tr("use_dash_for_auto") + ")", s["custom_java_path"]); new = "" if new == "-" else new
-                if new and not Path(new).expanduser().exists(): self.message(tr("java_not_found_title"), tr("java_not_found_body"), error=True)
-                else: s["custom_java_path"] = str(Path(new).expanduser()) if new else ""; self.store.save()
+                new = self.term.prompt(tr("java_manual") + " (" + tr("use_dash_for_auto") + ")", s["custom_java_path"]).strip()
+                new = "" if new == "-" else new
+                if new:
+                    java_path = Path(new).expanduser()
+                    if not java_path.is_file():
+                        self.message(tr("java_not_found_title"), tr("java_not_found_body"), error=True)
+                    else:
+                        s["custom_java_path"] = str(java_path.resolve())
+                        self.store.save()
+                else:
+                    s["custom_java_path"] = ""
+                    self.store.save()
             elif action == "language":
                 current = s.get("language", "en")
                 language_items = [MenuItem(("✓ " if code == current else "  ") + info["name"], code) for code, info in LANGUAGES.items()] + [MenuItem(tr("back"), None)]
@@ -734,6 +761,8 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
         else:
             game_dir = self.store.minecraft_dir
         jvm_args = [f"-Xms{cfg['min_ram_mb']}M", f"-Xmx{cfg['max_ram_mb']}M", "-Dfile.encoding=UTF-8"]
+        if os.name == "nt":
+            jvm_args.extend(["-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"])
         jvm_args.extend(proxy_jvm_arguments(self.store.proxy_profile()))
         options: dict[str, Any] = {
             "username": account["name"],
@@ -827,7 +856,7 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             finally:
                 q.put(("done", True))
 
-        thread = threading.Thread(target=worker, name="NullLaunchTask", daemon=False)
+        thread = threading.Thread(target=worker, name="NullLaunchTask", daemon=True)
         thread.start()
         first = True
         while not state["done"]:
@@ -857,12 +886,12 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             return ""
         try:
             info = self.mll.runtime.get_version_runtime_information(version_id, str(self.store.minecraft_dir))
-            if info is not None:
-                return ""
+            runtime_name = str(info.get("name") or "") if isinstance(info, dict) else "jre-legacy"
         except Exception:
-            return ""
-        try:
             runtime_name = "jre-legacy"
+        if not runtime_name:
+            runtime_name = "jre-legacy"
+        try:
             path = self.mll.runtime.get_executable_path(runtime_name, str(self.store.minecraft_dir))
             if path:
                 return str(path)
@@ -883,7 +912,7 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             path = self.mll.runtime.get_executable_path(runtime_name, str(self.store.minecraft_dir))
             return str(path or "")
         except Exception as exc:
-            self.log.warning("Legacy Java auto-install unavailable: %s", exc)
+            self.log.warning("Java runtime auto-install unavailable: %s", exc)
             return ""
 
     def play(self) -> None:
@@ -927,10 +956,20 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
 
             self._render_launch_progress(version_id, 4, total_stages, tr("launch_stage_command"), tr("preparing"))
             options = self._build_launch_options(account, version_id, auto_java)
-            command = self.mll.command.get_minecraft_command(version_id, str(self.store.minecraft_dir), options)
+            command = self._launch_progress_task(
+                version_id, 4, total_stages, tr("launch_stage_command"),
+                lambda cb: self.mll.command.get_minecraft_command(version_id, str(self.store.minecraft_dir), options),
+            )
             if not command:
                 raise RuntimeError(tr("empty_launch_command"))
-            command.extend(proxy_game_arguments(self.store.proxy_profile()))
+            parts = re.findall(r"\d+", version_id)
+            if parts and len(parts) >= 2:
+                try:
+                    major, minor = int(parts[0]), int(parts[1])
+                    if major < 1 or (major == 1 and minor < 13):
+                        command.extend(proxy_game_arguments(self.store.proxy_profile()))
+                except (ValueError, IndexError):
+                    pass
 
             self._render_launch_progress(version_id, 5, total_stages, tr("launch_stage_start"), tr("preparing"))
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -967,6 +1006,13 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             self.term._view_key = f"game-running:{version_id}"
             first_game_frame = True
             while process.poll() is None:
+                if hasattr(self.term, "_pump"):
+                    try:
+                        self.term._pump()
+                    except KeyboardInterrupt:
+                        with contextlib.suppress(Exception):
+                            process.terminate()
+                        raise
                 size = self.term.size()
                 w, h = max(20, int(size.columns)), max(8, int(size.lines))
                 content_w = max(16, min(140, w - 4))
@@ -987,14 +1033,30 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
 
             code = int(process.returncode or 0)
             if code != 0:
-                diagnostic_tail = tail_text(log_path, 100)
+                crash_log_path = log_path
+                hs_errs = list(game_cwd.glob(f"hs_err_pid{process.pid}.log")) or list(game_cwd.glob("hs_err_pid*.log"))
+                if hs_errs:
+                    hs_errs.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+                    crash_log_path = hs_errs[0]
+                else:
+                    crash_reports_dir = game_cwd / "crash-reports"
+                    if crash_reports_dir.is_dir():
+                        reports = list(crash_reports_dir.glob("crash-*.txt"))
+                        if reports:
+                            reports.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+                            if time.time() - reports[0].stat().st_mtime < 120:
+                                crash_log_path = reports[0]
+
+                diagnostic_tail = tail_text(crash_log_path, 300)
                 hints = diagnose_minecraft_crash(diagnostic_tail)
+                if not hints and crash_log_path != log_path:
+                    hints = diagnose_minecraft_crash(tail_text(log_path, 300))
                 assistant = ""
                 if hints:
                     assistant = "\n\n" + tr("crash_assistant_title") + ":\n" + "\n".join(f"• {tr(item.message_key)}" for item in hints)
-                tail = tail_text(log_path, 28)
-                details = f"{tr('exit_code')}: {code}{assistant}\n\n{tr('last_log_lines')}:\n{tail or tr('empty_log')}"
-                self.crash_screen(tr("game_crash_title"), details, log_path)
+                tail = tail_text(crash_log_path, 28)
+                details = f"{tr('exit_code')}: {code}{assistant}\n\n{tr('last_log_lines')} ({crash_log_path.name}):\n{tail or tr('empty_log')}"
+                self.crash_screen(tr("game_crash_title"), details, crash_log_path)
         except Exception as exc:
             self.log.exception("Launch failed")
             self.crash_screen(

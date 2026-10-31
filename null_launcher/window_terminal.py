@@ -17,6 +17,7 @@ from .utils import _cmd_filter_image, _sixel_geometry
 
 
 _ANSI_TOKEN_RE = re.compile(r"\x1b\[([0-9;]*)m")
+_NON_COLOR_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-LN-Za-z]|\x1b\][^\x07\x1b]*(\x07|\x1b\\)")
 _BASIC_COLORS = {
     30: "#000000", 31: "#CC6666", 32: "#B5BD68", 33: "#F0C674",
     34: "#81A2BE", 35: "#B294BB", 36: "#8ABEB7", 37: "#C5C8C6",
@@ -135,6 +136,14 @@ class WindowTerminal:
             self._events.put(InputEvent("resize"))
 
     def _on_key(self, event: Any) -> str:
+        state = getattr(event, "state", 0)
+        sym = str(event.keysym).lower()
+        if (state & 0x0004) and sym == "v":
+            self._events.put(InputEvent("key", "ctrl_v"))
+            return "break"
+        if (state & 0x0004) and sym == "c":
+            self._events.put(InputEvent("key", "ctrl_c"))
+            return "break"
         keys = {
             "Up": "up", "Down": "down", "Left": "left", "Right": "right",
             "Return": "enter", "KP_Enter": "enter", "Escape": "escape",
@@ -217,6 +226,7 @@ class WindowTerminal:
 
     @staticmethod
     def _parse_ansi(line: str) -> list[tuple[str, str, bool, bool]]:
+        line = _NON_COLOR_ANSI_RE.sub("", str(line))
         result: list[tuple[str, str, bool, bool]] = []
         color = "#D8DEE9"
         bold = False
@@ -425,7 +435,14 @@ class WindowTerminal:
                 return value.strip() or str(default or "")
             if event.key == "escape":
                 return str(default or "")
-            if event.key == "backspace":
+            if event.key == "ctrl_v":
+                try:
+                    pasted = self.root.clipboard_get()
+                    if pasted:
+                        value += str(pasted).strip("\r\n")
+                except Exception:
+                    pass
+            elif event.key == "backspace":
                 value = value[:-1]
             elif len(event.key) == 1 and ord(event.key) >= 32:
                 value += event.key

@@ -28,6 +28,8 @@ class ProfileScreenMixin:
 
     def create_account(self) -> None:
         name = self.term.prompt(tr("account_name_prompt"))
+        if not name:
+            return
         if not MC_NAME_RE.fullmatch(name):
             self.message(tr("invalid_name_title"), tr("invalid_account_name_body"), error=True)
             return
@@ -88,7 +90,10 @@ class ProfileScreenMixin:
                 self.proxy_detail(action[1])
 
     def create_proxy_profile(self) -> None:
-        name = clean_markup(self.term.prompt(tr("proxy_name_prompt")))[:32]
+        raw_name = self.term.prompt(tr("proxy_name_prompt"))
+        if not raw_name:
+            return
+        name = clean_markup(raw_name)[:32].strip()
         if not name:
             self.message(tr("invalid_name_title"), tr("invalid_proxy_name_body"), error=True)
             return
@@ -107,11 +112,16 @@ class ProfileScreenMixin:
         if protocol not in ("socks4", "socks5"):
             return
 
-        host = self.term.prompt(tr("proxy_host_prompt")).strip()
+        raw_host = self.term.prompt(tr("proxy_host_prompt"))
+        if not raw_host:
+            return
+        host = raw_host.strip()
         if not valid_proxy_host(host):
             self.message(tr("invalid_proxy_host_title"), tr("invalid_proxy_host_body"), error=True)
             return
         raw_port = self.term.prompt(tr("proxy_port_prompt"), "1080")
+        if not raw_port:
+            return
         try:
             port = int(raw_port)
         except ValueError:

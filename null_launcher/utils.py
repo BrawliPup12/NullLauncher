@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -520,9 +521,19 @@ def centered_splash_progress(width: int, value: int, maximum: int) -> str:
     return center_ansi(f"{cfg.PRIMARY_COLOR}{bar}{RESET}  {counter}", width)
 
 
+_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
 def slug(text: str) -> str:
     out = re.sub(r"[^A-Za-z0-9._-]+", "_", text).strip("._")
-    return out[:80] or "instance"
+    cleaned = out[:80] or "instance"
+    if cleaned.upper() in _RESERVED_NAMES:
+        cleaned = f"_{cleaned}"
+    return cleaned
 
 
 def atomic_json_write(path: Path, payload: Any) -> None:
@@ -533,7 +544,14 @@ def atomic_json_write(path: Path, payload: Any) -> None:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                break
+            except OSError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.05)
     finally:
         with contextlib.suppress(FileNotFoundError):
             os.unlink(tmp)
@@ -543,7 +561,16 @@ def load_json(path: Path, default: Any) -> Any:
     try:
         with path.open("r", encoding="utf-8") as f:
             return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
+    except FileNotFoundError:
+        return default
+    except (json.JSONDecodeError, OSError):
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                timestamp = int(time.time())
+                backup_path = path.with_name(f"{path.name}.corrupted-{timestamp}")
+                shutil.copy2(path, backup_path)
+        except OSError:
+            pass
         return default
 
 
@@ -553,9 +580,29 @@ def now_iso() -> str:
 
 def tail_text(path: Path, max_lines: int = 20) -> str:
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        return "".join(lines[-max_lines:]).strip()
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            if size == 0:
+                return ""
+            buffer_size = 4096
+            lines_found = 0
+            blocks = []
+            pos = size
+            while pos > 0 and lines_found <= max_lines + 1:
+                read_size = min(buffer_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                block = f.read(read_size)
+                lines_found += block.count(b"\n")
+                blocks.append(block)
+            raw = b"".join(reversed(blocks))
+            try:
+                text = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                text = raw.decode("cp1251", errors="replace")
+            lines = text.splitlines()
+            return "\n".join(lines[-max_lines:]).strip()
     except OSError:
         return ""
 

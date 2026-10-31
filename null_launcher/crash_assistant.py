@@ -29,7 +29,11 @@ _SIGNATURES: tuple[tuple[str, str, tuple[re.Pattern[str], ...]], ...] = (
         (
             re.compile(r"UnsupportedClassVersionError", re.I),
             re.compile(r"class file version \d+\.\d+.*only recognizes", re.I),
+            re.compile(r"Unsupported major\.minor version \d+", re.I),
             re.compile(r"has been compiled by a more recent version of the Java Runtime", re.I),
+            re.compile(r"InaccessibleObjectException", re.I),
+            re.compile(r"module java\.base does not open", re.I),
+            re.compile(r"Can't load IA 32-bit.*AMD 64-bit", re.I),
         ),
     ),
     (
@@ -39,9 +43,11 @@ _SIGNATURES: tuple[tuple[str, str, tuple[re.Pattern[str], ...]], ...] = (
             re.compile(r"Mixin(?:Apply|Transformer|Initialisation)?Error", re.I),
             re.compile(r"ModResolutionException", re.I),
             re.compile(r"ModLoadingException", re.I),
+            re.compile(r"StackOverflowError", re.I),
             re.compile(r"Failed to load mods", re.I),
             re.compile(r"Could not execute entrypoint", re.I),
             re.compile(r"Incompatible mod set", re.I),
+            re.compile(r"Missing or unsupported mandatory dependencies", re.I),
         ),
     ),
     (

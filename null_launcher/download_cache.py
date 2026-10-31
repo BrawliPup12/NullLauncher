@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import time
 from typing import Callable, Optional
+import uuid
 
 
 class DownloadCache:
@@ -37,11 +38,14 @@ class DownloadCache:
                 expected = str(meta.get("sha256") or "")
                 raw = data_path.read_bytes()
                 if expected and hashlib.sha256(raw).hexdigest() != expected:
+                    self.remove(url)
                     return None
-                os.utime(data_path, None)
+                with contextlib.suppress(OSError):
+                    os.utime(data_path, None)
                 return raw
             raw = data_path.read_bytes()
-            os.utime(data_path, None)
+            with contextlib.suppress(OSError):
+                os.utime(data_path, None)
             return raw
         except Exception:
             self.remove(url)
@@ -50,7 +54,8 @@ class DownloadCache:
     def put(self, url: str, raw: bytes) -> bytes:
         self.root.mkdir(parents=True, exist_ok=True)
         data_path, meta_path = self._paths(url)
-        tmp = data_path.with_suffix(".tmp")
+        token = uuid.uuid4().hex
+        tmp = data_path.with_name(f"{data_path.name}.{token}.tmp")
         tmp.write_bytes(raw)
         os.replace(tmp, data_path)
         meta = {
@@ -59,7 +64,7 @@ class DownloadCache:
             "size": len(raw),
             "saved_at": int(time.time()),
         }
-        meta_tmp = meta_path.with_suffix(".tmp")
+        meta_tmp = meta_path.with_name(f"{meta_path.name}.{token}.tmp")
         meta_tmp.write_text(json.dumps(meta, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
         os.replace(meta_tmp, meta_path)
         self.cleanup()
@@ -90,13 +95,19 @@ class DownloadCache:
     def cleanup(self) -> None:
         if not self.root.exists():
             return
+
+        def _safe_mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
         now = time.time()
-        data_files = sorted(self.root.glob("*.bin"), key=lambda p: p.stat().st_mtime if p.exists() else 0, reverse=True)
+        data_files = sorted(self.root.glob("*.bin"), key=_safe_mtime, reverse=True)
         for index, path in enumerate(data_files):
             remove = index >= self.max_entries
             if not remove:
-                with contextlib.suppress(OSError):
-                    remove = now - path.stat().st_mtime > self.max_age_seconds
+                remove = now - _safe_mtime(path) > self.max_age_seconds
             if remove:
                 key = path.stem
                 with contextlib.suppress(OSError):

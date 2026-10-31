@@ -12,6 +12,14 @@ from .terminal import Terminal
 MLL: Any = None
 
 
+def _pip_install_cmd(*packages: str) -> list[str]:
+    cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
+    if sys.prefix == getattr(sys, "base_prefix", sys.prefix):
+        cmd.append("--user")
+    cmd.extend(packages)
+    return cmd
+
+
 def ensure_minecraft_library(term: Optional[Terminal] = None) -> Any:
     global MLL
     try:
@@ -35,13 +43,14 @@ def ensure_minecraft_library(term: Optional[Terminal] = None) -> Any:
         pip_check = subprocess.run([sys.executable, "-m", "pip", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         if pip_check.returncode != 0:
             subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+        subprocess.check_call(_pip_install_cmd(
             f"minecraft-launcher-lib=={REQUIRED_MLL}",
             f"Pillow=={REQUIRED_PILLOW}",
-        ])
+        ))
         import importlib
+        importlib.invalidate_caches()
         lib = importlib.import_module("minecraft_launcher_lib")
+        lib = importlib.reload(lib)
         MLL = lib
         if term:
             term._init_console()
@@ -73,12 +82,11 @@ def ensure_image_library(term: Optional[Terminal] = None) -> Any:
         )
         if pip_check.returncode != 0:
             subprocess.check_call([sys.executable, "-m", "ensurepip", "--upgrade"])
-        subprocess.check_call([
-            sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
-            f"Pillow=={REQUIRED_PILLOW}",
-        ])
+        subprocess.check_call(_pip_install_cmd(f"Pillow=={REQUIRED_PILLOW}"))
         import importlib
+        importlib.invalidate_caches()
         image_module = importlib.import_module("PIL.Image")
+        image_module = importlib.reload(image_module)
         if term:
             term._init_console()
         return image_module

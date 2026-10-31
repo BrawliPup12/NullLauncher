@@ -228,19 +228,18 @@ def _verify_authenticode_signature(path: Path) -> None:
         return
     if os.name != "nt":
         raise RuntimeError("Authenticode verification is configured but Windows is unavailable")
-    escaped = str(path.resolve()).replace("'", "''")
-    script = (
-        f"$s=Get-AuthenticodeSignature -LiteralPath '{escaped}'; "
-        "$c=$s.SignerCertificate; "
-        "[pscustomobject]@{Status=[string]$s.Status;Subject=if($c){[string]$c.Subject}else{''};"
-        "Thumbprint=if($c){[string]$c.Thumbprint}else{''}} | ConvertTo-Json -Compress"
-    )
     system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
     powershell = system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     if not powershell.is_file():
         raise RuntimeError("Windows PowerShell is unavailable for Authenticode verification")
+    script = (
+        "param($p) $s=Get-AuthenticodeSignature -LiteralPath $p; "
+        "$c=$s.SignerCertificate; "
+        "[pscustomobject]@{Status=[string]$s.Status;Subject=if($c){[string]$c.Subject}else{''};"
+        "Thumbprint=if($c){[string]$c.Thumbprint}else{''}} | ConvertTo-Json -Compress"
+    )
     proc = subprocess.run(
-        [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+        [str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script, str(path.resolve())],
         capture_output=True, text=True, timeout=20, check=False, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if proc.returncode != 0:
@@ -441,8 +440,14 @@ def _schedule_delete_on_reboot(path: Path) -> None:
 
 
 def schedule_cleanup_path(path: str | Path) -> None:
-    target = Path(path).expanduser()
-    if not str(target):
+    try:
+        target = Path(path).resolve()
+        root = _update_root().resolve()
+        if not (target == root or root in target.parents):
+            return
+        if not re.fullmatch(r"\." + re.escape(APP_NAME) + r"-updater-[0-9a-fA-F]{32}\.exe", target.name):
+            return
+    except Exception:
         return
 
     def worker() -> None:
@@ -683,11 +688,17 @@ def run_update_helper(
     with contextlib.suppress(OSError):
         target_path.unlink()
     if backup is not None and backup.exists():
-        try:
-            os.replace(backup, target_path)
-            _append_update_log(log, "Previous executable restored.")
-        except OSError as exc:
-            _append_update_log(log, f"Rollback restore failed: {exc}")
+        restored = False
+        for _ in range(40):
+            try:
+                os.replace(backup, target_path)
+                restored = True
+                _append_update_log(log, "Previous executable restored.")
+                break
+            except OSError:
+                time.sleep(0.25)
+        if not restored:
+            _append_update_log(log, "Rollback restore failed after retries.")
     if metadata is not None:
         with contextlib.suppress(OSError):
             metadata.unlink()
@@ -769,6 +780,9 @@ def spawn_update_replacer(downloaded: Path, target: Path, info: Optional[UpdateI
             raise
         return
 
+    if not getattr(sys, "frozen", False):
+        raise RuntimeError("Self-update is only supported in packaged executable releases.")
+
     helper = """import os, subprocess, sys, time
 src, target, python = sys.argv[1:4]
 for _ in range(100):
@@ -793,8 +807,11 @@ def signal_update_health() -> None:
     raw = os.environ.get("NULLLAUNCHER_UPDATE_HEALTH_FILE", "").strip()
     if not raw:
         return
-    path = Path(raw)
     try:
+        path = Path(raw).resolve()
+        root = _update_root().resolve()
+        if not (path == root or root in path.parents):
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
         tmp.write_text(f"{APP_VERSION}\n", encoding="utf-8")

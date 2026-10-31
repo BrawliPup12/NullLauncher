@@ -89,6 +89,9 @@ class NewsScreenMixin:
                 max_age_seconds=30 * 24 * 60 * 60,
             )
             image = decode_article_image(raw)
+            if len(self._news_image_cache) >= 20:
+                first_key = next(iter(self._news_image_cache))
+                self._news_image_cache.pop(first_key, None)
             self._news_image_cache[image_url] = image
             return image
         except Exception as exc:
@@ -128,7 +131,19 @@ class NewsScreenMixin:
 
 
         url = self._article_url(base_entry) or self._article_url(entry)
-        real_image = self._load_news_image(entry)
+        real_image = None
+        img_url = self._resolve_news_image_url(entry)
+        if img_url:
+            if img_url in self._news_image_cache:
+                real_image = self._news_image_cache[img_url]
+            else:
+                try:
+                    real_image = self.progress_task(
+                        tr("loading_news"),
+                        lambda cb: self._load_news_image(entry),
+                    )
+                except Exception:
+                    real_image = None
         meta = " · ".join(x for x in (category, date) if x)
         items = ([MenuItem(tr("open_browser"), "open")] if url else []) + [MenuItem(tr("back_news"), "back")]
 

@@ -18,19 +18,28 @@ class SingleInstanceGuard:
 
     def acquire(self) -> bool:
         if os.name == "nt":
-            kernel32 = ctypes.windll.kernel32
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p]
             kernel32.CreateMutexW.restype = ctypes.c_void_p
-            handle = kernel32.CreateMutexW(None, 0, f"Local\\{self.name}-single-instance")
+            kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+            kernel32.CloseHandle.restype = ctypes.c_int
+            kernel32.ReleaseMutex.argtypes = [ctypes.c_void_p]
+            kernel32.ReleaseMutex.restype = ctypes.c_int
+
+            handle = kernel32.CreateMutexW(None, 1, f"Local\\{self.name}-single-instance")
             if not handle:
-                return True
+                return False
+            if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+                kernel32.CloseHandle(handle)
+                return False
             self._handle = int(handle)
-            return int(kernel32.GetLastError()) != 183
+            return True
 
         try:
             import fcntl
 
-            path = Path(tempfile.gettempdir()) / f".{self.name.lower()}-instance.lock"
+            uid = getattr(os, "getuid", lambda: "user")()
+            path = Path(tempfile.gettempdir()) / f".{self.name.lower()}-{uid}-instance.lock"
             handle = path.open("a+")
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             self._lock_file = handle

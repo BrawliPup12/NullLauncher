@@ -177,6 +177,11 @@ class Terminal:
                     k.SetConsoleMode(self.hin, self._old_in_mode)
                 if self._old_out_mode is not None:
                     k.SetConsoleMode(self.hout, self._old_out_mode)
+                user32 = ctypes.windll.user32
+                for hicon in getattr(self, "_window_icon_handles", []):
+                    with contextlib.suppress(Exception):
+                        user32.DestroyIcon(ctypes.c_void_p(hicon))
+                self._window_icon_handles.clear()
             except Exception:
                 pass
 
@@ -368,6 +373,8 @@ class Terminal:
 
     def cell_pixel_size(self) -> tuple[int, int]:
         """Return the terminal cell size in pixels, preferring exact WT metrics."""
+        if self._cell_px_cache is not None and getattr(self, "_cell_px_exact", False):
+            return self._cell_px_cache
         grid = (int(self.size().columns), int(self.size().lines))
         if self._cell_px_cache is not None and self._cell_px_grid == grid:
             return self._cell_px_cache

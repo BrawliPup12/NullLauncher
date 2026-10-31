@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import threading
 from typing import Any, Optional
 
 from .config import DEFAULT_THEME, LANGUAGES, MC_NAME_RE, _parse_rgb
@@ -47,21 +48,23 @@ class StateStore:
         self.base = base
         self.path = base / "state.json"
         self.cache_path = base / "cache.json"
+        self._lock = threading.RLock()
         self.data: dict[str, Any] = {}
         self.cache: dict[str, Any] = {}
         self.load()
 
     def load(self) -> None:
-        raw = load_json(self.path, {})
-        self.data = json.loads(json.dumps(DEFAULT_STATE))
-        self._deep_merge(self.data, raw if isinstance(raw, dict) else {})
-        if isinstance(raw, dict) and raw:
-            old_settings = raw.get("settings") if isinstance(raw.get("settings"), dict) else {}
-            if "first_run_complete" not in old_settings:
-                self.data["settings"]["first_run_complete"] = True
-        self._normalize()
-        cache = load_json(self.cache_path, {})
-        self.cache = cache if isinstance(cache, dict) else {}
+        with self._lock:
+            raw = load_json(self.path, {})
+            self.data = json.loads(json.dumps(DEFAULT_STATE))
+            self._deep_merge(self.data, raw if isinstance(raw, dict) else {})
+            if isinstance(raw, dict) and raw:
+                old_settings = raw.get("settings") if isinstance(raw.get("settings"), dict) else {}
+                if "first_run_complete" not in old_settings:
+                    self.data["settings"]["first_run_complete"] = True
+            self._normalize()
+            cache = load_json(self.cache_path, {})
+            self.cache = cache if isinstance(cache, dict) else {}
 
     @staticmethod
     def _deep_merge(dst: dict[str, Any], src: dict[str, Any]) -> None:
@@ -164,12 +167,18 @@ class StateStore:
             normalized, _ = _parse_rgb(s.get(key), DEFAULT_THEME[key])
             s[key] = normalized
 
+        if d.get("selected_version") is not None:
+            sel = str(d["selected_version"]).strip()
+            d["selected_version"] = sel if sel else None
+
     def save(self) -> None:
-        self._normalize()
-        atomic_json_write(self.path, self.data)
+        with self._lock:
+            self._normalize()
+            atomic_json_write(self.path, self.data)
 
     def save_cache(self) -> None:
-        atomic_json_write(self.cache_path, self.cache)
+        with self._lock:
+            atomic_json_write(self.cache_path, self.cache)
 
     def reset_launcher_settings(self) -> None:
         """Restore launcher preferences only; accounts and versions are untouched."""
