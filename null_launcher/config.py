@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import re
 from typing import Any, Optional
-from .localization import I18N, LANGUAGES, SPLASH_LINES
+from .localization import I18N, LANGUAGES, SPLASH_LINES, register_translations
 
 APP_NAME = "NullLauncher"
-APP_VERSION = "1.12.0"
+APP_VERSION = "1.13.0"
 REQUIRED_MLL = "8.0"
 REQUIRED_PILLOW = "12.3.0"
 MIN_PYTHON = (3, 10)

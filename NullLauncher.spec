@@ -1,19 +1,20 @@
                                       
 from pathlib import Path
-from PyInstaller.utils.hooks import collect_all
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 ROOT = Path(globals().get("SPECPATH", ".")).resolve()
 ICON = ROOT / "assets" / "NullLauncher.ico"
 VERSION_INFO = ROOT / "assets" / "version_info.txt"
 
 mll_datas, mll_binaries, mll_hidden = collect_all("minecraft_launcher_lib")
+nl_hidden = collect_submodules("null_launcher")
 
 analysis = Analysis(
     ["NullLauncher.py"],
     pathex=["."],
     binaries=mll_binaries,
     datas=mll_datas + [(str(ICON), "assets")],
-    hiddenimports=mll_hidden,
+    hiddenimports=mll_hidden + nl_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 from pathlib import Path
 import queue
 import re
-import shutil
 import subprocess
 import sys
 import threading
@@ -13,18 +13,18 @@ import time
 from typing import Any, Callable, Optional
 
 from . import config as cfg
-from .config import APP_NAME, APP_VERSION, BOLD, DIM, LANGUAGES, MC_NAME_RE, RED, RESET, SPLASH_LINES, YELLOW, apply_runtime_preferences, normalize_user_color, section_label, tr
-from .utils import brand_logo_lines, center_ansi, centered_splash_progress, clean_markup, clip, normalize_version_type, now_iso, offline_uuid, portable_mode_enabled, proxy_game_arguments, proxy_jvm_arguments, proxy_label, recommended_ram_mb, safe_int, slug, tail_text, wrap_plain
-from .updater import check_github_update, clear_update_download_cache, consume_pending_update, download_github_update, running_artifact_path, signal_update_health, spawn_update_replacer
+from .config import APP_NAME, APP_VERSION, BOLD, DIM, LANGUAGES, MC_NAME_RE, RED, RESET, SPLASH_LINES, YELLOW, apply_runtime_preferences, tr
+from .utils import brand_logo_lines, center_ansi, centered_splash_progress, clean_markup, clip, offline_uuid, proxy_game_arguments, proxy_jvm_arguments, proxy_label, safe_int, slug, tail_text, wrap_plain
+from .updater import check_github_update, consume_pending_update, download_github_update, running_artifact_path, signal_update_health, spawn_update_replacer
 from .state import StateStore
 from .download_cache import DownloadCache
 from .terminal import Menu, MenuItem, Terminal
 from .catalog import LauncherData, VersionEntry
 from .crash_assistant import diagnose_minecraft_crash
+from .modules import ModuleContext, ModulesManagerModule, SettingsModule, VersionsModule, create_default_registry
 from .news_ui import NewsScreenMixin
 from .profiles_ui import ProfileScreenMixin
 
-                                                                             
 
 class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
     def __init__(self, store: StateStore, term: Terminal, mll: Any, logger: logging.Logger):
@@ -38,6 +38,14 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
         self.running = True
         self._news_image_cache: dict[str, Any] = {}
         self.download_cache = DownloadCache(self.store.base / "download-cache", max_entries=96, max_age_seconds=30 * 24 * 60 * 60)
+        self.modules = create_default_registry(
+            log=logger,
+            external_dirs=[self.store.base / "modules"],
+        )
+        self.modules.reload_all(self.module_context())
+
+    def module_context(self) -> ModuleContext:
+        return ModuleContext(self)
 
     def splash(self) -> None:
         import random
@@ -60,7 +68,13 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
 
         def preload_worker() -> None:
             try:
-                self.data.preload(self.mll, on_progress)
+                news_active = hasattr(self, "modules") and self.modules.get_active_module("news") is not None
+                self.data.preload(self.mll, on_progress, load_news_module_active=news_active)
+                if hasattr(self, "modules"):
+                    extra_tasks = self.modules.collect_preload_tasks(self.module_context())
+                    for idx, (label, task_fn) in enumerate(extra_tasks, 1):
+                        on_progress(idx, max(1, len(extra_tasks)), label)
+                        task_fn()
             except BaseException as exc:
                 errors.append(exc)
 
@@ -169,57 +183,40 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
         self.show_post_update()
         while self.running:
             apply_runtime_preferences(self.store.settings)
-            account = self.store.account()
-            proxy = self.store.proxy_profile()
-            selected = self.store.data.get("selected_version") or tr("not_selected")
-            acc_name = account["name"] if account else tr("not_selected")
-            proxy_name = proxy["name"] if proxy else tr("none")
-            mode_suffix = f" · {tr('portable_mode')}" if portable_mode_enabled() else ""
-            header = [
-                f"{cfg.SUBTITLE_COLOR}{DIM}NullLauncher v{APP_VERSION}{mode_suffix}{RESET}",
-                f"{cfg.SUBTITLE_COLOR}{DIM}{tr('account')}:{RESET} {acc_name}    {cfg.SUBTITLE_COLOR}{DIM}{tr('version')}:{RESET} {selected}",
-                f"{cfg.SUBTITLE_COLOR}{DIM}{tr('proxy')}:{RESET} {proxy_name}",
-            ]
-            last_launch = self.store.last_launch()
-            if last_launch.get("version"):
-                stamp = str(last_launch.get("launched_at") or "").replace("T", " ").replace("Z", "")[:19]
-                header.append(f"{cfg.SUBTITLE_COLOR}{DIM}{tr('last_played')}:{RESET} {last_launch['version']}" + (f" · {stamp}" if stamp else ""))
-
-            items = [MenuItem(tr("play"), "play")]
-            quick_versions: list[tuple[str, str]] = []
-            if last_launch.get("version"):
-                quick_versions.append((tr("quick_play_last", version=last_launch["version"]), str(last_launch["version"])))
-            for favorite in self.store.favorite_versions():
-                if favorite != last_launch.get("version"):
-                    quick_versions.append((tr("quick_play_favorite", version=favorite), favorite))
-            if quick_versions:
-                items.append(MenuItem(section_label(tr("quick_play_section")), selectable=False))
-                items.extend(MenuItem(label, ("quick-play", version)) for label, version in quick_versions[:4])
-            items.extend([
-                MenuItem(tr("versions"), "versions"),
-                MenuItem(tr("accounts"), "accounts"),
-                MenuItem(tr("proxies"), "proxies"),
-                MenuItem(tr("settings"), "settings"),
-                MenuItem(tr("exit"), "exit"),
-            ])
+            ctx = self.module_context()
+            header = self.modules.collect_header_lines(ctx)
+            items, bottom_item = self.modules.build_main_menu(ctx)
             action = self.menu.choose(
-                "", items, header=header, allow_escape=False,
+                "",
+                items,
+                header=header,
+                allow_escape=False,
                 footer=tr("footer_main"),
-                bottom_item=MenuItem(tr("news"), "news"),
+                bottom_item=bottom_item,
                 view_key="main",
             )
             try:
-                if action == "play": self.play()
-                elif isinstance(action, tuple) and action and action[0] == "quick-play":
-                    self.store.data["selected_version"] = str(action[1])
-                    self.store.save()
-                    self.play()
-                elif action == "versions": self.versions_screen()
-                elif action == "accounts": self.accounts_screen()
-                elif action == "proxies": self.proxies_screen()
-                elif action == "settings": self.settings_screen()
-                elif action == "news": self.news_screen()
-                elif action == "exit": self.running = False
+                if action == "exit":
+                    self.running = False
+                elif not self.modules.dispatch_action(ctx, action):
+                    if action == "play":
+                        self.play()
+                    elif isinstance(action, tuple) and action and action[0] == "quick-play":
+                        self.store.data["selected_version"] = str(action[1])
+                        self.store.save()
+                        self.play()
+                    elif action == "versions":
+                        self.versions_screen()
+                    elif action == "accounts":
+                        self.accounts_screen()
+                    elif action == "proxies":
+                        self.proxies_screen()
+                    elif action == "modules":
+                        self.modules_screen()
+                    elif action == "settings":
+                        self.settings_screen()
+                    elif action == "news":
+                        self.news_screen()
             except SystemExit:
                 raise
             except Exception as exc:
@@ -483,272 +480,46 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
                                                                              
 
     def versions_screen(self) -> None:
-        filter_kind = "all"
-        query = ""
-        filter_order = ["all", "vanilla", "fabric", "forge", "neoforge", "quilt"]
-        while True:
-            filter_names = {"all": tr("all"), "vanilla": "Vanilla", "fabric": "Fabric", "forge": "Forge", "neoforge": "NeoForge", "quilt": "Quilt"}
-            catalog = self.data.build_catalog(filter_kind, query)
-            installed_entries = [e for e in catalog if e.installed]
-            available_entries = [e for e in catalog if not e.installed]
-            items: list[MenuItem] = [MenuItem(f"{tr('search')}: {query or tr('none')}", ("search", None)), MenuItem(f"{tr('filter')}: {filter_names[filter_kind]}", ("filter", None))]
-            if installed_entries:
-                items.append(MenuItem(section_label(tr("installed")), selectable=False))
-                for entry in installed_entries:
-                    selected = "★" if entry.selected else " "
-                    items.append(MenuItem(f"✓{selected} {entry.label}", ("version", entry), hint=normalize_version_type(entry.version_type)))
-            if available_entries:
-                items.append(MenuItem(section_label(tr("available")), selectable=False))
-                for entry in available_entries:
-                    items.append(MenuItem(f"   {entry.label}", ("version", entry), hint=normalize_version_type(entry.version_type)))
-            items.append(MenuItem(tr("back"), ("back", None)))
-            action = self.menu.choose(tr("versions"), items, subtitle=tr("catalog_summary", count=len(catalog)), spacer_after_title=True, view_key="versions")
-            if not action or action[0] == "back": return
-            if action[0] == "search": query = self.term.prompt(tr("search"), query)
-            elif action[0] == "filter": filter_kind = filter_order[(filter_order.index(filter_kind) + 1) % len(filter_order)]
-            elif action[0] == "version":
-                self.version_detail(action[1])
-                self.data.refresh_installed(self.mll)
+        ctx = self.module_context()
+        modules = getattr(self, "modules", None)
+        if modules is not None:
+            mod = modules.get_active_module("versions")
+            if mod is not None:
+                mod.open_screen(ctx)
+                return
+        VersionsModule().versions_screen(ctx)
 
     def version_detail(self, entry: VersionEntry) -> None:
-        need_refresh = False
-        while True:
-            if need_refresh:
-                catalog = self.data.build_catalog("all", "")
-                entry = next((e for e in catalog if e.key == entry.key or (entry.installed_id and e.installed_id == entry.installed_id)), entry)
-                need_refresh = False
-            subtitle = f"{tr('source')}: {entry.loader_id or entry.kind} · Minecraft: {entry.mc_version}"
-            items: list[MenuItem] = []
-            if entry.installed:
-                if self.store.data.get("selected_version") != entry.installed_id:
-                    items.append(MenuItem(tr("select_launch"), "select"))
-                favorite_key = "favorite_remove" if self.store.is_favorite_version(entry.installed_id) else "favorite_add"
-                items.append(MenuItem(tr(favorite_key), "favorite"))
-                items.append(MenuItem(tr("version_settings"), "settings"))
-                items.append(MenuItem(tr("delete"), "delete"))
-            else:
-                items.append(MenuItem(tr("download"), "install"))
-            items.append(MenuItem(tr("back"), "back"))
-            action = self.menu.choose(entry.label, items, subtitle=subtitle)
-            if not action or action == "back":
-                return
-            if action == "select":
-                self.store.data["selected_version"] = entry.installed_id
-                self.store.save()
-                return
-            if action == "install":
-                if self.install_version(entry):
-                    return
-            elif action == "favorite":
-                self.store.toggle_favorite_version(entry.installed_id)
-            elif action == "settings":
-                self.version_settings_screen(entry.installed_id)
-            elif action == "delete":
-                if self.delete_version(entry):
-                    return
+        VersionsModule().version_detail(self.module_context(), entry)
 
     def install_version(self, entry: VersionEntry) -> bool:
-        if entry.loader_id == "forge":
-            if not self.confirm(
-                tr("forge_install_title"),
-                tr("forge_install_warning"),
-            ):
-                return False
-        mc_dir = str(self.store.minecraft_dir)
-        try:
-            if entry.kind == "vanilla":
-                def task(cb: dict[str, Callable]) -> str:
-                    self.mll.install.install_minecraft_version(entry.mc_version, mc_dir, callback=cb)
-                    return entry.mc_version
-            elif entry.kind == "loader":
-                def task(cb: dict[str, Callable]) -> str:
-                    loader = self.mll.mod_loader.get_mod_loader(entry.loader_id)
-                    java = self.store.settings.get("custom_java_path") or None
-                    return str(loader.install(entry.mc_version, mc_dir, callback=cb, java=java))
-            else:
-                self.message(tr("cannot_download_title"), tr("local_version_required"), error=True)
-                return False
-            installed_id = str(self.progress_task(tr("installing_version", version=entry.label), task))
-            self.store.data["managed_versions"][entry.key] = {
-                "kind": entry.kind,
-                "loader_id": entry.loader_id,
-                "mc_version": entry.mc_version,
-                "installed_id": installed_id,
-                "installed_at": now_iso(),
-            }
-            self.store.data["selected_version"] = installed_id
-            self.store.save()
-            self.data.refresh_installed(self.mll)
-            self.message(tr("install_complete_title"), tr("install_complete_body", label=entry.label, installed_id=installed_id))
-            return True
-        except Exception as exc:
-            self.log.exception("Install failed: %s", entry.key)
-            self.message(tr("install_error_title"), f"{type(exc).__name__}: {exc}\n\n{tr('details_in_log')}", error=True)
-            return False
+        return VersionsModule().install_version(self.module_context(), entry)
 
     def delete_version(self, entry: VersionEntry) -> bool:
-        vid = entry.installed_id
-        if not vid:
-            return False
-        if not self.confirm(tr("delete_version_title"), tr("delete_version_body", version=vid)):
-            return False
-        versions_root = (self.store.minecraft_dir / "versions").resolve()
-        target = (versions_root / vid).resolve()
-        try:
-            if target.parent != versions_root:
-                raise RuntimeError(tr("unsafe_version_path"))
-            if target.exists():
-                shutil.rmtree(target)
-            instance_dir = (self.store.base / "instances" / slug(vid)).resolve()
-            if instance_dir.exists() and instance_dir.parent == (self.store.base / "instances").resolve():
-                with contextlib.suppress(OSError):
-                    shutil.rmtree(instance_dir)
-            for key, item in list(self.store.data["managed_versions"].items()):
-                if isinstance(item, dict) and item.get("installed_id") == vid:
-                    self.store.data["managed_versions"].pop(key, None)
-            self.store.data["version_settings"].pop(vid, None)
-            if self.store.data.get("selected_version") == vid:
-                self.store.data["selected_version"] = None
-            self.store.data["favorite_versions"] = [item for item in self.store.favorite_versions() if item != vid]
-            if self.store.last_launch().get("version") == vid:
-                self.store.data["last_launch"] = {}
-            self.store.save()
-            self.data.refresh_installed(self.mll)
-            return True
-        except Exception as exc:
-            self.log.exception("Delete failed: %s", vid)
-            self.message(tr("delete_failed_title"), str(exc), error=True)
-            return False
+        return VersionsModule().delete_version(self.module_context(), entry)
 
     def version_settings_screen(self, installed_id: str) -> None:
-        while True:
-            cfg = self.store.version_config(installed_id)
-            yn = lambda v: tr("yes") if v else tr("no")
-            items = [
-                MenuItem(section_label(tr("version_memory")), selectable=False),
-                MenuItem(f"{tr('ram_min')}: {cfg['min_ram_mb']} MB", "min_ram"),
-                MenuItem(f"{tr('ram_max')}: {cfg['max_ram_mb']} MB", "max_ram"),
-                MenuItem(section_label(tr("version_window")), selectable=False),
-                MenuItem(f"{tr('custom_resolution')}: {yn(cfg['custom_resolution'])}", "resolution_toggle"),
-                MenuItem(f"{tr('window_size')}: {cfg['resolution_width']}×{cfg['resolution_height']}", "resolution"),
-                MenuItem(section_label(tr("version_files")), selectable=False),
-                MenuItem(f"{tr('separate_dir')}: {yn(cfg['separate_game_dir'])}", "separate"),
-                MenuItem(section_label(tr("version_actions")), selectable=False),
-                MenuItem(tr("reset_defaults"), "reset"), MenuItem(tr("back"), "back"),
-            ]
-            action = self.menu.choose(f"{tr('version_settings')} · {installed_id}", items, spacer_after_title=True, view_key=f"version-settings:{installed_id}")
-            if not action or action == "back": return
-            if action in ("min_ram", "max_ram"):
-                key = "min_ram_mb" if action == "min_ram" else "max_ram_mb"
-                raw = self.term.prompt(tr("ram_min") if action == "min_ram" else tr("ram_max"), str(cfg[key]))
-                cfg[key] = safe_int(raw, cfg[key], 256 if key == "min_ram_mb" else 512, 131072)
-                if cfg["max_ram_mb"] < cfg["min_ram_mb"]: cfg["max_ram_mb"] = cfg["min_ram_mb"]
-            elif action == "resolution_toggle": cfg["custom_resolution"] = not cfg["custom_resolution"]
-            elif action == "resolution":
-                w = self.term.prompt(tr("window_size") + " · " + tr("width_label"), str(cfg["resolution_width"]))
-                h = self.term.prompt(tr("window_size") + " · " + tr("height_label"), str(cfg["resolution_height"]))
-                cfg["resolution_width"] = safe_int(w, cfg["resolution_width"], 320, 16384)
-                cfg["resolution_height"] = safe_int(h, cfg["resolution_height"], 240, 16384)
-            elif action == "separate": cfg["separate_game_dir"] = not cfg["separate_game_dir"]
-            elif action == "reset":
-                if self.confirm(tr("reset_defaults"), tr("version_reset_confirm")): self.store.reset_version_settings(installed_id)
-                continue
-            self.store.data["version_settings"][installed_id] = cfg; self.store.save()
+        VersionsModule().version_settings_screen(self.module_context(), installed_id)
 
-                                                                             
+    def modules_screen(self) -> None:
+        ctx = self.module_context()
+        modules = getattr(self, "modules", None)
+        if modules is not None:
+            mod = modules.get_active_module("modules")
+            if mod is not None:
+                mod.open_screen(ctx)
+                return
+        ModulesManagerModule().modules_screen(ctx)
 
     def settings_screen(self) -> None:
-        while True:
-            apply_runtime_preferences(self.store.settings)
-            s = self.store.settings
-            yn = lambda v: tr("yes") if v else tr("no")
-            lang_name = LANGUAGES.get(s.get("language", "en"), LANGUAGES["en"])["name"]
-            items = [
-                MenuItem(section_label(tr("settings_paths")), selectable=False),
-                MenuItem(f"{tr('minecraft_dir')}: {s['minecraft_dir']}", "mc_dir"),
-                MenuItem(f"{tr('java_manual')}: {s['custom_java_path'] or tr('auto_runtime')}", "java"),
-                MenuItem(section_label(tr("settings_catalog")), selectable=False),
-                MenuItem(f"{tr('show_snapshots')}: {yn(s['show_snapshots'])}", "snapshots"), MenuItem(f"{tr('show_old')}: {yn(s['show_old_versions'])}", "old_versions"), MenuItem(f"{tr('load_news')}: {yn(s['news_enabled'])}", "news"),
-                MenuItem(section_label(tr("settings_interface")), selectable=False),
-                MenuItem(f"{tr('language')}: {lang_name}", "language"),
-                MenuItem(f"{tr('primary_color')}: {s['theme_primary']}", "color_primary"), MenuItem(f"{tr('subtitle_color')}: {s['theme_subtitle']}", "color_subtitle"), MenuItem(f"{tr('status_color')}: {s['theme_status']}", "color_status"), MenuItem(f"{tr('news_filter_color')}: {s['news_filter_color']}", "color_news_filter"),
-                MenuItem(f"{tr('mouse_menu')}: {yn(s['mouse_enabled'])}", "mouse", hint=tr("after_restart")),
-                MenuItem(section_label(tr("settings_launch")), selectable=False),
-                MenuItem(f"{tr('default_ram')}: {s['default_min_ram_mb']}–{s['default_max_ram_mb']} MB", "ram"), MenuItem(f"{tr('repair')}: {yn(s['repair_before_launch'])}", "repair"), MenuItem(f"{tr('close_after')}: {yn(s['close_launcher_on_game_start'])}", "close"),
-                MenuItem(section_label(tr("settings_updates")), selectable=False),
-                MenuItem(f"{tr('auto_update')}: {yn(s['auto_update'])}", "auto_update"), MenuItem(tr("check_updates_now"), "check_update"),
-                MenuItem(section_label(tr("settings_actions")), selectable=False),
-                MenuItem(tr("clear_download_cache"), "clear_cache"), MenuItem(tr("open_data"), "open_data"), MenuItem(tr("reset_defaults"), "reset"), MenuItem(tr("back"), "back"),
-            ]
-            action = self.menu.choose(tr("settings"), items, spacer_after_title=True, view_key="launcher-settings")
-            if not action or action == "back": return
-            if action == "mc_dir":
-                new = self.term.prompt(tr("minecraft_dir"), s["minecraft_dir"]).strip()
-                if new:
-                    path = Path(new).expanduser()
-                    if path.is_file():
-                        self.message(tr("path_unavailable_title"), tr("path_unavailable_title"), error=True)
-                    else:
-                        try:
-                            path.mkdir(parents=True, exist_ok=True)
-                            s["minecraft_dir"] = str(path.resolve())
-                            self.store.save()
-                            self.data.refresh_installed(self.mll)
-                        except OSError as exc:
-                            self.message(tr("path_unavailable_title"), str(exc), error=True)
-            elif action in ("snapshots", "old_versions", "news", "mouse", "repair", "close", "auto_update"):
-                key = {"snapshots":"show_snapshots","old_versions":"show_old_versions","news":"news_enabled","mouse":"mouse_enabled","repair":"repair_before_launch","close":"close_launcher_on_game_start","auto_update":"auto_update"}[action]
-                s[key] = not s[key]; self.store.save()
-            elif action == "check_update":
-                self.manual_update_check()
-            elif action == "ram":
-                s["default_min_ram_mb"] = safe_int(self.term.prompt(tr("ram_min") + " · MB", str(s["default_min_ram_mb"])), 1024, 256, 65536)
-                s["default_max_ram_mb"] = safe_int(self.term.prompt(tr("ram_max") + " · MB", str(s["default_max_ram_mb"])), recommended_ram_mb(), 512, 131072)
-                if s["default_max_ram_mb"] < s["default_min_ram_mb"]: s["default_max_ram_mb"] = s["default_min_ram_mb"]
-                self.store.save()
-            elif action == "java":
-                new = self.term.prompt(tr("java_manual") + " (" + tr("use_dash_for_auto") + ")", s["custom_java_path"]).strip()
-                new = "" if new == "-" else new
-                if new:
-                    java_path = Path(new).expanduser()
-                    if not java_path.is_file():
-                        self.message(tr("java_not_found_title"), tr("java_not_found_body"), error=True)
-                    else:
-                        s["custom_java_path"] = str(java_path.resolve())
-                        self.store.save()
-                else:
-                    s["custom_java_path"] = ""
-                    self.store.save()
-            elif action == "language":
-                current = s.get("language", "en")
-                language_items = [MenuItem(("✓ " if code == current else "  ") + info["name"], code) for code, info in LANGUAGES.items()] + [MenuItem(tr("back"), None)]
-                selected_language = self.menu.choose(tr("language_title"), language_items, spacer_after_title=True, view_key="language")
-                if selected_language in LANGUAGES and selected_language != current:
-                                                                                   
-                                                                                        
-                    s["language"] = selected_language; self.store.save(); apply_runtime_preferences(s)
-            elif action in ("color_primary", "color_subtitle", "color_status", "color_news_filter"):
-                key = {"color_primary":"theme_primary","color_subtitle":"theme_subtitle","color_status":"theme_status","color_news_filter":"news_filter_color"}[action]
-                normalized = normalize_user_color(self.term.prompt(tr("color_prompt"), s[key]))
-                if normalized:
-                    s[key] = normalized; self.store.save(); apply_runtime_preferences(s); self.term._last_frame = []; self.term._last_graphic_key = None; self.term._sixel_cache.clear()
-                else: self.message(tr("color_title"), tr("color_error"), error=True)
-            elif action == "clear_cache":
-                self.download_cache.clear()
-                clear_update_download_cache()
-                self._news_image_cache.clear()
-                self.term._sixel_cache.clear()
-                self.message(tr("clear_download_cache"), tr("download_cache_cleared"))
-            elif action == "open_data":
-                try:
-                    self.store.base.mkdir(parents=True, exist_ok=True)
-                    if os.name == "nt": os.startfile(str(self.store.base))                              
-                    elif sys.platform == "darwin": subprocess.Popen(["open", str(self.store.base)])
-                    else: subprocess.Popen(["xdg-open", str(self.store.base)])
-                except Exception as exc: self.message(tr("open_folder_title"), str(exc), error=True)
-            elif action == "reset":
-                if self.confirm(tr("reset_defaults"), tr("reset_confirm")):
-                    self.store.reset_launcher_settings(); apply_runtime_preferences(self.store.settings); self.term._last_frame = []; self.term._last_graphic_key = None; self.term._sixel_cache.clear()
+        ctx = self.module_context()
+        modules = getattr(self, "modules", None)
+        if modules is not None:
+            mod = modules.get_active_module("settings")
+            if mod is not None:
+                mod.open_screen(ctx)
+                return
+        SettingsModule().settings_screen(ctx)
                                                                                   
                                                                               
 
@@ -915,7 +686,17 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             self.log.warning("Java runtime auto-install unavailable: %s", exc)
             return ""
 
-    def play(self) -> None:
+    def _execute_play(self) -> None:
+        self.play(_bypass_override=True)
+
+    def play(self, *, _bypass_override: bool = False) -> None:
+        modules = getattr(self, "modules", None)
+        if not _bypass_override and modules is not None and modules.is_replaced("play"):
+            mod = modules.get_active_module("play")
+            if mod is not None:
+                mod.open_screen(self.module_context())
+                return
+
         account = self.store.account()
         version_id = self.store.data.get("selected_version")
         if not account:
@@ -937,6 +718,7 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
             self.message(tr("version_missing_title"), tr("version_missing_body", version=version_id), error=True)
             return
 
+        ctx = self.module_context()
         log_path = self.store.base / "game-latest.log"
         launcher_log = self.store.base / "null_launcher.log"
         total_stages = 5
@@ -956,6 +738,8 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
 
             self._render_launch_progress(version_id, 4, total_stages, tr("launch_stage_command"), tr("preparing"))
             options = self._build_launch_options(account, version_id, auto_java)
+            if modules is not None:
+                modules.run_before_launch(ctx, version_id, options)
             command = self._launch_progress_task(
                 version_id, 4, total_stages, tr("launch_stage_command"),
                 lambda cb: self.mll.command.get_minecraft_command(version_id, str(self.store.minecraft_dir), options),
@@ -970,6 +754,8 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
                         command.extend(proxy_game_arguments(self.store.proxy_profile()))
                 except (ValueError, IndexError):
                     pass
+            if modules is not None:
+                command = modules.run_modify_command(ctx, version_id, command, options)
 
             self._render_launch_progress(version_id, 5, total_stages, tr("launch_stage_start"), tr("preparing"))
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1032,6 +818,8 @@ class NullLauncher(NewsScreenMixin, ProfileScreenMixin):
                 time.sleep(0.10)
 
             code = int(process.returncode or 0)
+            if modules is not None:
+                modules.run_after_launch(ctx, version_id, code)
             if code != 0:
                 crash_log_path = log_path
                 hs_errs = list(game_cwd.glob(f"hs_err_pid{process.pid}.log")) or list(game_cwd.glob("hs_err_pid*.log"))

@@ -4,13 +4,13 @@
 ![GitHub Downloads](https://img.shields.io/github/downloads/BrawliPup12/NullLauncher/total)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 
-A lightweight terminal-based Minecraft launcher for Windows.
+A lightweight, modular terminal-styled Minecraft launcher for Windows.
 
 NullLauncher is built around a simple idea:
 
-> No unnecessary UI. No heavy framework. Just launch Minecraft.
+> No unnecessary bloat. No heavy framework. Fully modular. Just launch Minecraft.
 
-It runs directly inside Windows Terminal / CMD and keeps the terminal-first workflow while providing version management, offline profiles, news, per-version settings, updates, diagnostics, and a small set of quality-of-life features.
+It renders in its own native lightweight terminal-styled window (or directly inside Windows Terminal / CMD) and features a **fully modular architecture** where every screen and subsystem is a module that can be toggled, extended, or completely replaced without breaking the launcher.
 
 ---
 
@@ -26,7 +26,7 @@ Minecraft is a trademark of Microsoft Corporation.
 
 Download `NullLauncher.exe` from **GitHub → Releases → Latest Release** and run it.
 
-By default, launcher settings/cache are stored in the normal per-user application-data directory. Minecraft itself still uses the configured Minecraft directory.
+By default, launcher settings, cache, and external modules are stored in `%APPDATA%\NullLauncher`. Minecraft itself uses the configured `.minecraft` directory.
 
 ### Portable mode
 
@@ -36,7 +36,7 @@ Create an empty file named:
 portable.flag
 ```
 
-next to `NullLauncher.exe` before starting the launcher. NullLauncher will then keep its own state, cache, downloaded launcher data, and separate per-version instances under:
+next to `NullLauncher.exe` before starting the launcher. NullLauncher will then keep its own state, cache, modules (`data\modules\`), and separate per-version instances under:
 
 ```text
 data\
@@ -44,33 +44,209 @@ data\
 
 next to the executable.
 
-The configured main `.minecraft` directory is not silently moved; only NullLauncher-owned data and separate instances become portable.
-
 ---
 
 ## Features
 
-- Terminal-first UI with mouse and keyboard navigation
-- Vanilla, Forge, NeoForge, Fabric, and Quilt support
-- Offline account profiles
-- Proxy profiles
-- Per-version RAM, resolution, Java, and game-directory settings
-- Quick Play with the last launched version and up to 3 favorite versions
-- Last-launch timestamp on the home screen
-- Optional portable mode via `portable.flag`
-- Minecraft news with locale-aware deduplication
-- News translation cached only for the currently selected UI language
-- Hardened news-image loading (HTTPS-only, private-network blocking, byte and pixel limits)
-- SIXEL image previews in supported terminals
-- Multilingual interface
-- GitHub Releases auto-update with mandatory SHA-256 verification
-- Optional Authenticode publisher pinning for signed updates
-- Update rollback and post-update health check
-- Crash Assistant for common RAM, Java, mod/mixin, native-library, and graphics failures
-- Built-in diagnostics
-- Configurable launcher theme colors
-- Automatic Mojang Java/runtime handling
-- Optional file verification before launch
+- **Fully Modular Architecture**: Every core subsystem (`play`, `versions`, `accounts`, `modules`, `settings`) is a module; drop `.py` files into `modules/` to add new features or replace built-in screens
+- **Fast, Lean Core Startup**: Optional subsystems are not hardcoded into the startup path — if the `news` module is not installed, startup skips news fetching and translation completely
+- **Official vs. Unofficial Module Verification**: Cryptographic SHA-256 verification (evaluated before module execution) distinguishes genuine **Official NullLauncher Modules (`★`)** from third-party/community modules
+- **Fault-Isolated Plugin Execution**: Syntax errors or runtime exceptions inside any external module are caught and isolated so the launcher never crashes
+- **Native Windowed Terminal UI & Console Support**: Runs as a standalone native GUI window with keyboard and mouse navigation, or in classic console mode (`--console`)
+- **Vanilla, Forge, NeoForge, Fabric, and Quilt** support
+- **Offline Account Profiles** with deterministic offline UUIDs
+- **Per-version Settings**: Custom RAM (`-Xms` / `-Xmx`), resolution, Java path, and isolated instance directories
+- **Quick Play**: Launch the last played version or up to 3 favorite versions directly from the home screen
+- **Multilingual Interface**: 12 built-in languages with an extensible translation registry for external modules
+- **GitHub Releases Auto-Update** with mandatory SHA-256 verification, staged replacement, rollback, and post-update health checks
+- **Crash Assistant** for common RAM, Java, mod/mixin, native-library, and graphics failures
+- **Automatic Mojang Java Runtime** detection and installation
+
+---
+
+## External Modules
+
+To keep the core launcher fast and lightweight, optional features are distributed as standalone `.py` modules that you can drop into your `modules/` folder (**Modules → Open modules folder** inside the launcher, or `%APPDATA%\NullLauncher\modules\`):
+
+### Official NullLauncher Modules (`official_modules/`)
+
+Verified automatically by NullLauncher via pinned pre-execution SHA-256 digests (`★ Official NullLauncher module`):
+
+| Module | File | ID | Description |
+| :--- | :--- | :--- | :--- |
+| **Minecraft News** | [`official_modules/news.py`](official_modules/news.py) | `news` | Official Minecraft news feed with localized article translations, SIXEL cover previews, and Settings integration. |
+| **Proxies** | [`official_modules/proxies.py`](official_modules/proxies.py) | `proxies` | SOCKS4 / SOCKS5 proxy profile manager and active proxy status line in the main menu header. |
+
+### Community / Third-Party Modules (`community_modules/`)
+
+| Module | File | ID | Description |
+| :--- | :--- | :--- | :--- |
+| **Modrinth Mods** | [`community_modules/modrinth.py`](community_modules/modrinth.py) | `modrinth` | Search, download, and manage Minecraft mods directly from Modrinth into `mods/` with automatic MC/loader filtering, SHA-512 verification, and required dependency installation. |
+
+> **Note:** `modrinth.py` is currently provided as a community/third-party module and is not part of the pinned official module set.
+
+---
+
+## Module Development Guide (For Developers)
+
+NullLauncher is designed so anyone can write a new module or replace an existing built-in screen by placing a single `.py` file (or a package directory with `__init__.py`) into the `modules/` folder:
+
+- **Standard mode:** `%APPDATA%\NullLauncher\modules\`
+- **Portable mode:** `data\modules\`
+- **Custom path override:** set the `NULLLAUNCHER_MODULES_DIR` environment variable
+
+After adding or editing a file, either restart NullLauncher or click **Modules → Reload modules** in the UI.
+
+### 1. Full Class-Based Module (`LauncherModule`)
+
+Subclass `LauncherModule` from `null_launcher.modules` for full control over menus, headers, settings, version catalog providers, and game launch hooks:
+
+```python
+from __future__ import annotations
+
+from typing import Any
+from null_launcher.modules import (
+    LauncherModule,
+    MenuContribution,
+    ModuleContext,
+    ModuleMetadata,
+    SettingContribution,
+)
+from null_launcher.terminal import MenuItem
+
+
+class MyCustomModule(LauncherModule):
+    meta = ModuleMetadata(
+        id="my_custom_tool",
+        name_key="my_tool_title",
+        description_key="my_tool_desc",
+        version="1.0.0",
+        author="YourName",
+        order=35,          # Controls position in the main menu (Play=10, Versions=20, Accounts=30, Modules=50, Settings=60)
+        can_disable=True,
+    )
+
+    # Optional: register translations for any language (automatically falls back to "en")
+    translations = {
+        "en": {
+            "my_tool_title": "My Custom Tool",
+            "my_tool_desc": "Adds a custom screen and JVM launch flag.",
+            "my_tool_hello": "Hello from MyCustomModule!",
+        },
+        "ru": {
+            "my_tool_title": "Мой модуль",
+            "my_tool_desc": "Добавляет свой экран и аргумент запуска JVM.",
+            "my_tool_hello": "Привет из MyCustomModule!",
+        },
+    }
+
+    def get_menu_items(self, ctx: ModuleContext) -> list[MenuContribution]:
+        return [
+            MenuContribution(
+                id="my_custom_tool",
+                label=ctx.tr("my_tool_title"),
+                order=self.meta.order,
+                location="main",  # "main" or "bottom"
+            )
+        ]
+
+    def open_screen(self, ctx: ModuleContext) -> None:
+        state = ctx.module_state(self.meta.id)
+        visits = int(state.get("visits", 0)) + 1
+        state["visits"] = visits
+        ctx.save_state()
+
+        ctx.menu.choose(
+            ctx.tr("my_tool_title"),
+            [MenuItem(ctx.tr("back"), "back")],
+            subtitle=f"{ctx.tr('my_tool_hello')} (visits: {visits})",
+            spacer_after_title=True,
+        )
+
+    def on_before_launch(self, ctx: ModuleContext, version_id: str, options: dict[str, Any]) -> None:
+        options.setdefault("jvmArguments", []).append("-Dmy.custom.module=true")
+```
+
+### 2. Minimal Single-File Script Style
+
+For quick scripts, you don't even need to define a class — just define `MODULE_ID` and hook functions at the top level of your `.py` file:
+
+```python
+MODULE_ID = "fps_boost_flags"
+MODULE_NAME = "JVM GC Flags"
+MODULE_DESCRIPTION = "Appends custom G1GC flags before launching Minecraft."
+MODULE_VERSION = "1.0.0"
+MODULE_AUTHOR = "You"
+MODULE_ORDER = 45
+
+
+def open_screen(ctx):
+    ctx.message("JVM GC Flags", "Custom G1GC flags are active!")
+
+
+def on_before_launch(ctx, version_id, options):
+    options.setdefault("jvmArguments", []).extend([
+        "-XX:+UnlockExperimentalVMOptions",
+        "-XX:+UseG1GC",
+    ])
+```
+
+### 3. Replacing Built-in Core Modules
+
+Any built-in module (`play`, `versions`, `accounts`, `modules`, `settings`) or external slot (`proxies`, `news`) can be replaced by setting `replaces="<slot_id>"` in `ModuleMetadata`:
+
+```python
+class CustomVersionsModule(LauncherModule):
+    meta = ModuleMetadata(
+        id="custom_versions",
+        name="Custom Versions Browser",
+        replaces="versions",  # Overrides the built-in Versions module
+        order=20,
+    )
+
+    def get_menu_items(self, ctx: ModuleContext) -> list[MenuContribution]:
+        return [MenuContribution(id="versions", label="Custom Versions", order=20)]
+
+    def open_screen(self, ctx: ModuleContext) -> None:
+        ...
+```
+
+If the user disables or deletes `custom_versions.py` in the **Modules** manager, NullLauncher automatically restores the original built-in `versions` module without restarting.
+
+### 4. Adding Custom Version Catalog Providers (`VersionSourceProvider`)
+
+Modules can inject new version tabs, entries, and installers directly into the **Versions** screen by implementing `VersionSourceProvider` and returning it from `get_version_providers(self, ctx: ModuleContext)`:
+
+- `filter_tabs(ctx) -> list[tuple[str, str]]`: adds filter tabs to the Versions screen
+- `build_entries(ctx, filter_kind, query) -> list[VersionEntry]`: supplies catalog rows
+- `can_handle(ctx, entry) -> bool`: claims installation handling for matching entries
+- `install(ctx, entry) -> str`: performs installation and returns the installed version ID
+
+### 5. Available `LauncherModule` Hooks & `ModuleContext` API
+
+| Hook / Method | Purpose |
+| :--- | :--- |
+| `on_load(ctx)` / `on_unload(ctx)` | Called when the module becomes active or is deactivated/reloaded. |
+| `get_header_lines(ctx) -> list[str]` | Contributes status lines to the top header on the home screen. |
+| `get_menu_items(ctx) -> list[MenuContribution]` | Adds items to the main menu (`location="main"`) or bottom bar (`location="bottom"`). |
+| `get_settings_items(ctx) -> list[SettingContribution]` | Adds custom rows to the **Settings** screen under *Module settings*. |
+| `get_version_providers(ctx) -> list[VersionSourceProvider]` | Extends the **Versions** catalog with custom loaders or modpacks. |
+| `get_preload_tasks(ctx) -> list[tuple[str, Callable]]` | Runs background preload tasks during the startup splash screen. |
+| `on_before_launch(ctx, version_id, options)` | Mutates `options` (`jvmArguments`, `gameDirectory`, etc.) before command generation. |
+| `on_modify_command(ctx, version_id, command, options)` | Inspects or modifies the final `java` command list before `Popen`. |
+| `on_after_launch(ctx, version_id, exit_code)` | Called after the Minecraft process exits. |
+
+`ctx` (`ModuleContext`) provides safe access to:
+- `ctx.store` (`StateStore`), `ctx.module_state(module_id)` (persistent per-module JSON dictionary in `state.json`), and `ctx.save_state()`
+- `ctx.menu` (`Menu`), `ctx.term` (`Terminal`), `ctx.data` (`LauncherData`), `ctx.download_cache` (`DownloadCache`)
+- `ctx.tr(key, **kwargs)`, `ctx.message(title, text, error=False)`, `ctx.confirm(title, text)`, `ctx.prompt(label, default="")`, `ctx.progress_task(title, fn)`
+
+### 6. Official Module Authenticity Verification
+
+NullLauncher verifies official external modules in `null_launcher/modules/trust.py`:
+- Raw file bytes are read from disk **before** `exec_module` executes the module's Python code.
+- The normalized SHA-256 digest is compared in constant time (`hmac.compare_digest`) against an immutable closure table of official module digests.
+- Setting `author="NullLauncher"` or attempting to monkeypatch `trust` at import time cannot spoof the `★ Official NullLauncher module` badge.
 
 ---
 
@@ -89,64 +265,17 @@ The configured main `.minecraft` directory is not silently moved; only NullLaunc
 - 日本語
 - 한국어
 
-News translations are warmed only for the language selected at startup. Existing cached translations for other languages are retained, but NullLauncher no longer sends translation requests for every supported language on each catalog refresh.
-
 ---
 
 ## Update security
 
 NullLauncher treats update verification as fail-closed:
 
-1. A release must provide a SHA-256 digest for `NullLauncher.exe`, either through GitHub's asset digest or a published checksum asset such as `NullLauncher.exe.sha256`.
+1. A release must provide a SHA-256 digest for `NullLauncher.exe`, either through GitHub's asset digest or `NullLauncher.exe.sha256`.
 2. The downloaded file must match that SHA-256 exactly.
 3. The payload must pass executable/version validation before installation.
 4. If Authenticode pinning is configured, the Windows signature must be valid and must match the configured certificate identity.
-5. The existing staged install, rollback, and health-check flow is used after validation.
-
-An update without a usable SHA-256 digest is rejected instead of being trusted merely because it begins with the `MZ` executable header.
-
-### Authenticode pinning
-
-Set one or both values in `null_launcher/config.py` before publishing builds signed by your certificate:
-
-```python
-UPDATE_SIGNER_SUBJECT = "CN=Your Publisher Name, ..."
-UPDATE_SIGNER_THUMBPRINT = "YOUR_CERTIFICATE_THUMBPRINT"
-```
-
-When either value is configured, update installation requires a valid Authenticode signature matching the configured value. Leave both empty only while the project does not yet have a real signing certificate; do not invent a publisher identity.
-
-The release workflow can sign the final EXE when these GitHub Actions secrets are configured:
-
-```text
-WINDOWS_CERTIFICATE_BASE64
-WINDOWS_CERTIFICATE_PASSWORD
-```
-
-`WINDOWS_CERTIFICATE_BASE64` should contain the Base64 representation of the PFX certificate. After signing, the workflow creates `NullLauncher.exe.sha256` from the final signed executable and uploads both files to the release.
-
----
-
-## Release pipeline
-
-The Windows workflow separates build and release privileges:
-
-- the build job has `contents: read` only;
-- the release job receives `contents: write` only for tag builds;
-- third-party/built-in GitHub Actions are pinned to full commit SHAs;
-- Python is pinned for the release build;
-- PyInstaller and Pillow are pinned to exact versions;
-- release-critical Windows wheels are reinstalled using hashes from `requirements-build.lock`;
-- tests run before packaging;
-- the tag must match `APP_VERSION`;
-- the built/signed EXE is smoke-tested before release;
-- a SHA-256 sidecar is generated from the exact final artifact.
-
-For a local release-style build:
-
-```powershell
-.\scripts\build.ps1
-```
+5. Staged install, rollback, and post-update health-check flows protect against broken updates.
 
 ---
 
@@ -157,7 +286,22 @@ NullLauncher/
 ├── .github/
 │   └── workflows/
 │       └── build-windows.yml
+├── community_modules/
+│   └── modrinth.py              # Community Modrinth browser & downloader module
+├── official_modules/
+│   ├── news.py                  # Official Minecraft News external module (SHA-256 verified)
+│   └── proxies.py               # Official SOCKS4/SOCKS5 Proxies external module (SHA-256 verified)
 ├── null_launcher/
+│   ├── modules/
+│   │   ├── __init__.py          # Built-in core registry factory
+│   │   ├── accounts_module.py   # Offline accounts core module
+│   │   ├── base.py              # LauncherModule, ModuleContext, contributions & providers
+│   │   ├── modules_module.py    # Modules Manager UI screen
+│   │   ├── play_module.py       # Game launch & Quick Play core module
+│   │   ├── registry.py          # Dynamic module discovery, override resolution & fault isolation
+│   │   ├── settings_module.py   # Launcher settings core module
+│   │   ├── trust.py             # Unforgeable SHA-256 verification for official modules
+│   │   └── versions_module.py   # Version catalog & loader installer core module
 │   ├── __init__.py
 │   ├── __main__.py
 │   ├── app.py
@@ -167,6 +311,7 @@ NullLauncher/
 │   ├── crash_assistant.py
 │   ├── diagnostics.py
 │   ├── download_cache.py
+│   ├── instance.py
 │   ├── localization.py
 │   ├── minecraft.py
 │   ├── news.py
@@ -183,6 +328,7 @@ NullLauncher/
 │   └── verify_windows_build.py
 ├── tests/
 │   ├── test_features.py
+│   ├── test_modules.py
 │   ├── test_news.py
 │   ├── test_smoke.py
 │   └── test_updater.py
@@ -192,93 +338,40 @@ NullLauncher/
 ├── requirements.txt
 ├── requirements-dev.txt
 ├── requirements-build.lock
-├── .gitignore
 └── README.md
 ```
 
-`config.py` now contains runtime/configuration constants, while the large localization tables live in `localization.py`. News and account/proxy screen logic are separated from the main application class through small UI mixins.
-
 ---
 
-## Requirements
+## Building & Running from Source
 
-### For users
-
-Nothing besides a supported Windows environment. The release EXE bundles the Python runtime and required libraries.
-
-### For development
-
-- Windows 10 / 11
-- Python 3.10+
-- PowerShell
-- Git
-
-Runtime dependencies are in `requirements.txt`. Development/build dependencies are in `requirements-dev.txt`; release-critical wheel hashes are in `requirements-build.lock`.
-
----
-
-## Building from source
-
-```powershell
-git clone https://github.com/BrawliPup12/NullLauncher.git
-cd NullLauncher
-.\scripts\build.ps1
-```
-
-If PowerShell blocks script execution:
-
-```powershell
-Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
-.\scripts\build.ps1
-```
-
-The compiled executable will appear at:
-
-```text
-dist\NullLauncher.exe
-```
-
----
-
-## Running from source
+### Run from source
 
 ```powershell
 python -m pip install -r requirements.txt
 python NullLauncher.py
 ```
 
-Available commands:
+Available CLI flags:
 
 ```powershell
 python NullLauncher.py
+python NullLauncher.py --console
 python NullLauncher.py --version
 python NullLauncher.py --diagnose
 ```
 
-When a required runtime dependency is missing in source mode, NullLauncher installs the exact configured version rather than an arbitrary newer Pillow release.
+### Build standalone Windows executable (`dist\NullLauncher.exe`)
 
----
+```powershell
+.\scripts\build.ps1
+```
 
-## Tests
+### Run tests
 
 ```powershell
 python -m pytest -q
 ```
-
-The suite includes regression coverage for localized-news deduplication, current-language-only translation, update checksum enforcement, news-image hardening, Crash Assistant signatures, Quick Play state, and portable mode.
-
----
-
-## Contributing
-
-Issues and pull requests are welcome. For a reproducible bug report, include:
-
-- NullLauncher version
-- Windows version
-- terminal used
-- Minecraft version
-- error message or relevant log
-- steps to reproduce
 
 ---
 

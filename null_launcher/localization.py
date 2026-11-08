@@ -1658,3 +1658,185 @@ _FEATURE_TEXT_RU = {
 for _lang in LANGUAGES:
     I18N[_lang].update(_FEATURE_TEXT_EN)
 I18N["ru"].update(_FEATURE_TEXT_RU)
+
+_MODULE_TEXT_EN = {
+    "modules": "Modules",
+    "modules_subtitle": "{active} active · {external} external · {total} total",
+    "modules_section_builtin": "Built-in core modules",
+    "modules_section_external": "External modules",
+    "modules_section_official": "Official NullLauncher modules",
+    "modules_section_unofficial": "Third-party (unofficial) modules",
+    "module_trust_label": "Authenticity",
+    "module_trust_core": "Built-in NullLauncher core",
+    "module_trust_official": "★ Official NullLauncher module (SHA-256 verified)",
+    "module_trust_unofficial": "Unofficial third-party module",
+    "module_badge_official": "★ official",
+    "module_badge_unofficial": "unofficial",
+    "module_sha256_label": "SHA-256",
+    "modules_open_folder": "Open modules folder",
+    "modules_reload": "Reload modules",
+    "modules_reloaded_body": "Modules reloaded: {active} active of {total}.",
+    "module_status_active": "active",
+    "module_status_disabled": "disabled",
+    "module_status_replaced": "replaced by {by}",
+    "module_status_error": "error",
+    "module_enable": "Enable module",
+    "module_disable": "Disable module",
+    "module_open_screen": "Open module screen",
+    "module_source_builtin": "built-in",
+    "module_source_external": "external ({file})",
+    "module_author": "Author",
+    "module_id_label": "ID",
+    "module_replaces_label": "Replaces",
+    "module_status_label": "Status",
+    "module_error_label": "Error",
+    "module_core_locked": "Core module (cannot be disabled, but can be replaced)",
+    "settings_modules_custom": "Module settings",
+    "module_play_desc": "Game launch pipeline, Quick Play, and JVM runtime management.",
+    "module_versions_desc": "Version catalog, Vanilla and mod loader installation, per-version settings.",
+    "module_accounts_desc": "Offline player profiles and active account selection.",
+    "module_proxies_desc": "SOCKS4/SOCKS5 proxy profiles for game connections.",
+    "module_news_desc": "Official Minecraft news feed with localized articles and SIXEL previews.",
+    "module_settings_desc": "Launcher preferences, theme colors, language, paths, and updates.",
+    "module_modules_desc": "Module manager for enabling, disabling, replacing, and loading custom modules.",
+    "modrinth": "Modrinth Mods",
+    "module_modrinth_desc": "Search, download, and manage Minecraft mods directly from Modrinth with automatic dependencies.",
+    "modrinth_subtitle": "MC: {mc} · Loader: {loader} · Installed in mods: {installed}",
+    "modrinth_search_popular": "popular",
+    "modrinth_loader_filter": "Loader",
+    "modrinth_mc_filter": "MC version",
+    "modrinth_auto_fmt": "Auto ({value})",
+    "modrinth_mc_prompt": "Enter Minecraft version for Modrinth filter (or - for auto, * for all)",
+    "modrinth_installed_btn": "Installed mods ({count})",
+    "modrinth_open_mods_folder": "Open mods folder",
+    "modrinth_refresh": "Refresh catalog",
+    "modrinth_section_catalog": "Modrinth Catalog",
+    "modrinth_section_installed": "Mods in folder",
+    "modrinth_loading": "Loading Modrinth catalog…",
+    "modrinth_loading_versions": "Checking compatible mod versions…",
+    "modrinth_downloading": "Downloading {name}…",
+    "modrinth_downloading_dep": "Downloading dependency {index}/{total}…",
+    "modrinth_no_results": "No mods found for current filter",
+    "modrinth_network_error": "Could not load Modrinth: {error}",
+    "modrinth_no_compatible_version": "No compatible file found on Modrinth for MC {mc} ({loader}). Try changing Loader or MC version filter.",
+    "modrinth_compatible_file": "Compatible file: {file} ({size})",
+    "modrinth_downloads_label": "Downloads: {downloads} · Author: {author}",
+    "modrinth_install_btn": "Download to mods ({file})",
+    "modrinth_reinstall_btn": "Reinstall / update ({file})",
+    "modrinth_delete_btn": "Remove from mods ({file})",
+    "modrinth_open_web": "Open on Modrinth in browser",
+    "modrinth_install_done_title": "Mod installed",
+    "modrinth_install_done_body": "Installed into {folder}:\n{files}",
+    "modrinth_delete_confirm": "Delete {file} from the mods folder?",
+    "modrinth_enable_mod": "Enable mod (.jar)",
+    "modrinth_disable_mod": "Disable mod (.jar.disabled)",
+    "modrinth_state_enabled": "enabled",
+    "modrinth_state_disabled": "disabled",
+    "modrinth_empty_folder": "The mods folder is currently empty.",
+}
+_MODULE_TEXT_RU = {
+    "modules": "Модули",
+    "modules_subtitle": "{active} активно · {external} внешних · {total} всего",
+    "modules_section_builtin": "Встроенные модули ядра",
+    "modules_section_external": "Внешние модули",
+    "modules_section_official": "Официальные модули NullLauncher",
+    "modules_section_unofficial": "Сторонние (неофициальные) модули",
+    "module_trust_label": "Подлинность",
+    "module_trust_core": "Встроенное ядро NullLauncher",
+    "module_trust_official": "★ Официальный модуль NullLauncher (SHA-256 подтверждён)",
+    "module_trust_unofficial": "Неофициальный сторонний модуль",
+    "module_badge_official": "★ официальный",
+    "module_badge_unofficial": "неофициальный",
+    "module_sha256_label": "SHA-256",
+    "modules_open_folder": "Открыть папку модулей",
+    "modules_reload": "Перезагрузить модули",
+    "modules_reloaded_body": "Модули перезагружены: активно {active} из {total}.",
+    "module_status_active": "активен",
+    "module_status_disabled": "отключён",
+    "module_status_replaced": "заменён на {by}",
+    "module_status_error": "ошибка",
+    "module_enable": "Включить модуль",
+    "module_disable": "Отключить модуль",
+    "module_open_screen": "Открыть экран модуля",
+    "module_source_builtin": "встроенный",
+    "module_source_external": "внешний ({file})",
+    "module_author": "Автор",
+    "module_id_label": "ID",
+    "module_replaces_label": "Заменяет",
+    "module_status_label": "Статус",
+    "module_error_label": "Ошибка",
+    "module_core_locked": "Системный модуль (нельзя отключить, но можно заменить)",
+    "settings_modules_custom": "Настройки модулей",
+    "module_play_desc": "Запуск игры, быстрый запуск и управление средой Java.",
+    "module_versions_desc": "Каталог версий, установка Vanilla и модлоадеров, настройки версий.",
+    "module_accounts_desc": "Оффлайн-профили игроков и выбор активного аккаунта.",
+    "module_proxies_desc": "Профили прокси SOCKS4/SOCKS5 для сетевого подключения игры.",
+    "module_news_desc": "Официальная лента новостей Minecraft с переводом и превью SIXEL.",
+    "module_settings_desc": "Настройки лаунчера, цвета темы, язык, пути и обновления.",
+    "module_modules_desc": "Менеджер модулей для включения, отключения, замены и загрузки своих модулей.",
+    "modrinth": "Моды Modrinth",
+    "module_modrinth_desc": "Поиск, скачивание и управление модами с Modrinth с автоустановкой зависимостей.",
+    "modrinth_subtitle": "MC: {mc} · Загрузчик: {loader} · В папке mods: {installed}",
+    "modrinth_search_popular": "популярные",
+    "modrinth_loader_filter": "Загрузчик",
+    "modrinth_mc_filter": "Версия MC",
+    "modrinth_auto_fmt": "Авто ({value})",
+    "modrinth_mc_prompt": "Версия Minecraft для фильтра Modrinth (- для авто, * для всех)",
+    "modrinth_installed_btn": "Установленные моды ({count})",
+    "modrinth_open_mods_folder": "Открыть папку mods",
+    "modrinth_refresh": "Обновить каталог",
+    "modrinth_section_catalog": "Каталог Modrinth",
+    "modrinth_section_installed": "Файлы в папке mods",
+    "modrinth_loading": "Загружаю каталог Modrinth…",
+    "modrinth_loading_versions": "Подбираю совместимую версию мода…",
+    "modrinth_downloading": "Скачиваю {name}…",
+    "modrinth_downloading_dep": "Скачиваю зависимость {index}/{total}…",
+    "modrinth_no_results": "По текущему фильтру моды не найдены",
+    "modrinth_network_error": "Ошибка загрузки Modrinth: {error}",
+    "modrinth_no_compatible_version": "На Modrinth не найден файл под MC {mc} ({loader}). Попробуй сменить фильтр загрузчика или версии MC.",
+    "modrinth_compatible_file": "Совместимый файл: {file} ({size})",
+    "modrinth_downloads_label": "Скачиваний: {downloads} · Автор: {author}",
+    "modrinth_install_btn": "Скачать в mods ({file})",
+    "modrinth_reinstall_btn": "Переустановить / обновить ({file})",
+    "modrinth_delete_btn": "Удалить из mods ({file})",
+    "modrinth_open_web": "Открыть на Modrinth в браузере",
+    "modrinth_install_done_title": "Мод установлен",
+    "modrinth_install_done_body": "Установлено в {folder}:\n{files}",
+    "modrinth_delete_confirm": "Удалить файл {file} из папки mods?",
+    "modrinth_enable_mod": "Включить мод (.jar)",
+    "modrinth_disable_mod": "Отключить мод (.jar.disabled)",
+    "modrinth_state_enabled": "включён",
+    "modrinth_state_disabled": "отключён",
+    "modrinth_empty_folder": "В папке mods пока нет ни одного файла.",
+}
+for _lang in LANGUAGES:
+    I18N[_lang].update(_MODULE_TEXT_EN)
+I18N["ru"].update(_MODULE_TEXT_RU)
+
+
+def register_translations(translations: dict[str, dict[str, str]]) -> None:
+    """Register custom module translation keys across all supported languages."""
+    if not isinstance(translations, dict):
+        return
+    all_keys: set[str] = set()
+    for table in translations.values():
+        if isinstance(table, dict):
+            all_keys.update(str(k) for k in table.keys())
+    if not all_keys:
+        return
+    en_table = translations.get("en") if isinstance(translations.get("en"), dict) else {}
+    ru_table = translations.get("ru") if isinstance(translations.get("ru"), dict) else {}
+    for key in all_keys:
+        fallback = en_table.get(key) or ru_table.get(key)
+        if fallback is None:
+            for table in translations.values():
+                if isinstance(table, dict) and key in table:
+                    fallback = table[key]
+                    break
+        default_val = str(fallback if fallback is not None else key)
+        for lang in LANGUAGES:
+            lang_table = translations.get(lang)
+            val = lang_table.get(key) if isinstance(lang_table, dict) and key in lang_table else default_val
+            if val is not None or key not in I18N[lang]:
+                I18N[lang][key] = str(val)
+

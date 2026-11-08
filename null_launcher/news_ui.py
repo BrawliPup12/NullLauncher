@@ -100,6 +100,15 @@ class NewsScreenMixin:
             return None
 
     def news_screen(self) -> None:
+        modules = getattr(self, "modules", None)
+        if modules is not None and modules.is_replaced("news"):
+            mod = modules.get_active_module("news")
+            if mod is not None and hasattr(self, "module_context"):
+                mod.open_screen(self.module_context())
+                return
+        self._default_news_screen()
+
+    def _default_news_screen(self) -> None:
         if not self.data.news:
             self.message(tr("news"), tr("news_unavailable"), error=bool(self.data.network_errors))
             return

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "nulllauncher"
-version = "1.12.0"
+version = "1.13.0"
 description = "Terminal Minecraft launcher for Windows"
 requires-python = ">=3.10"
 dependencies = [
@@ -16,4 +16,4 @@ dependencies = [
 nulllauncher = "null_launcher.cli:main"
 
 [tool.setuptools]
-packages = ["null_launcher"]
+packages = ["null_launcher", "null_launcher.modules"]

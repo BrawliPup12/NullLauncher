@@ -64,12 +64,16 @@ jobs:
         run: |
           $process = Start-Process -FilePath .\dist\NullLauncher.exe -ArgumentList "--version" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "NullLauncher.exe --version exited with code $($process.ExitCode)" }
+          Copy-Item -Force .\official_modules\*.py .\dist\
 
       - name: Upload build artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: NullLauncher-windows
-          path: dist/NullLauncher.exe
+          path: |
+            dist/NullLauncher.exe
+            dist/news.py
+            dist/proxies.py
           if-no-files-found: error
 
   release:
@@ -121,7 +125,7 @@ jobs:
         run: |
           gh release view "${{ github.ref_name }}" *> $null
           if ($LASTEXITCODE -eq 0) {
-            gh release upload "${{ github.ref_name }}" .\dist\NullLauncher.exe .\dist\NullLauncher.exe.sha256 --clobber
+            gh release upload "${{ github.ref_name }}" .\dist\NullLauncher.exe .\dist\NullLauncher.exe.sha256 .\dist\news.py .\dist\proxies.py --clobber
           } else {
-            gh release create "${{ github.ref_name }}" .\dist\NullLauncher.exe .\dist\NullLauncher.exe.sha256 --generate-notes --title "${{ github.ref_name }}"
+            gh release create "${{ github.ref_name }}" .\dist\NullLauncher.exe .\dist\NullLauncher.exe.sha256 .\dist\news.py .\dist\proxies.py --generate-notes --title "${{ github.ref_name }}"
           }

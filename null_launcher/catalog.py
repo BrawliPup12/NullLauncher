@@ -43,15 +43,26 @@ class LauncherData:
     def _cache_get(self, key: str, default: Any) -> Any:
         return self.store.cache.get(key, default)
 
-    def preload(self, mll: Any, progress: Callable[[int, int, str], None]) -> None:
-        """Load independent launcher data concurrently, then warm current-language news.
+    def preload(
+        self,
+        mll: Any,
+        progress: Callable[[int, int, str], None],
+        *,
+        load_news_module_active: bool = False,
+    ) -> None:
+        """Load independent launcher data concurrently.
 
-        Network-heavy catalog/news requests do not wait for each other. News
-        translation is cached only for the language selected for this run.
+        News fetching and translation only run when the external official news
+        module is installed and active.
         """
+        should_load_news = bool(load_news_module_active and self.store.settings.get("news_enabled", True))
         selected_language = str(self.store.settings.get("language") or "en")
-        translation_languages = [selected_language] if selected_language in LANGUAGES and selected_language != "en" else []
-        total = 5 + len(translation_languages)
+        translation_languages = (
+            [selected_language]
+            if should_load_news and selected_language in LANGUAGES and selected_language != "en"
+            else []
+        )
+        total = (5 if should_load_news else 4) + len(translation_languages)
         step = 0
         progress(step, total, tr("preload_local"))
         self.store.minecraft_dir.mkdir(parents=True, exist_ok=True)
@@ -139,19 +150,23 @@ class LauncherData:
                     f"{tr('news_status')}: {tr('fresh_offline_cache')}" if fallback else f"{tr('news_status')}: {tr('unavailable')}"
                 ), False
 
-        combined_status = " · ".join((tr("preload_vanilla"), tr("preload_loaders"), tr("preload_news")))
+        status_parts = [tr("preload_vanilla"), tr("preload_loaders")]
+        if should_load_news:
+            status_parts.append(tr("preload_news"))
+        combined_status = " · ".join(status_parts)
         progress(step, total, combined_status)
         task_labels = {
             "vanilla": tr("preload_vanilla"),
             "loaders": tr("preload_loaders"),
             "news": tr("preload_news"),
         }
-        with ThreadPoolExecutor(max_workers=3, thread_name_prefix="NullStartup") as pool:
+        with ThreadPoolExecutor(max_workers=3 if should_load_news else 2, thread_name_prefix="NullStartup") as pool:
             futures = {
                 pool.submit(load_vanilla): "vanilla",
                 pool.submit(load_loaders): "loaders",
-                pool.submit(load_news): "news",
             }
+            if should_load_news:
+                futures[pool.submit(load_news)] = "news"
             for future in as_completed(futures):
                 kind = futures[future]
                 if kind == "vanilla":
@@ -185,15 +200,14 @@ class LauncherData:
 
                                                                                   
                                                                                    
-        if self.news and translation_languages:
+        base_steps = 4 if should_load_news else 3
+        if should_load_news and self.news and translation_languages:
             root = self.store.cache.get("news_translations", {})
             existing = root if isinstance(root, dict) else {}
 
             def translation_progress(done: int, count: int, language: str) -> None:
                 nonlocal step
-                                                                             
-                                                                      
-                step = 4 + min(done, len(translation_languages))
+                step = base_steps + min(done, len(translation_languages))
                 language_name = LANGUAGES.get(language, {}).get("name", language)
                 progress(step, total, f"{tr('loading_news')} · {language_name} · {done}/{count}")
 
@@ -210,12 +224,10 @@ class LauncherData:
                         translation_root[language] = lang_cache
                     lang_cache.update(language_updates)
             except Exception as exc:
-                                                                                 
-                                                                                  
                 self.log.warning("News pretranslation failed: %s", exc)
-            step = 4 + len(translation_languages)
+            step = base_steps + len(translation_languages)
         else:
-            step = 4 + len(translation_languages)
+            step = base_steps + len(translation_languages)
 
         progress(step, total, tr("preload_profiles"))
         self._clean_managed_versions()

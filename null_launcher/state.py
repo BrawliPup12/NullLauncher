@@ -21,6 +21,7 @@ DEFAULT_STATE: dict[str, Any] = {
     "last_launch": {},
     "managed_versions": {},
     "version_settings": {},
+    "module_data": {},
     "settings": {
         "minecraft_dir": default_minecraft_dir(),
         "show_snapshots": False,
@@ -39,6 +40,7 @@ DEFAULT_STATE: dict[str, Any] = {
         "theme_subtitle": DEFAULT_THEME["theme_subtitle"],
         "theme_status": DEFAULT_THEME["theme_status"],
         "news_filter_color": DEFAULT_THEME["news_filter_color"],
+        "disabled_modules": [],
     },
 }
 
@@ -150,6 +152,14 @@ class StateStore:
             d["managed_versions"] = {}
         if not isinstance(d.get("version_settings"), dict):
             d["version_settings"] = {}
+        if not isinstance(d.get("module_data"), dict):
+            d["module_data"] = {}
+        else:
+            d["module_data"] = {
+                str(k): (v if isinstance(v, dict) else {})
+                for k, v in d["module_data"].items()
+                if str(k).strip()
+            }
         if not isinstance(d.get("settings"), dict):
             d["settings"] = json.loads(json.dumps(DEFAULT_STATE["settings"]))
         s = d["settings"]
@@ -166,6 +176,15 @@ class StateStore:
         for key in ("theme_primary", "theme_subtitle", "theme_status", "news_filter_color"):
             normalized, _ = _parse_rgb(s.get(key), DEFAULT_THEME[key])
             s[key] = normalized
+        raw_disabled = s.get("disabled_modules")
+        if not isinstance(raw_disabled, list):
+            raw_disabled = []
+        clean_disabled: list[str] = []
+        for item in raw_disabled:
+            mid = str(item or "").strip()[:80]
+            if mid and mid not in clean_disabled:
+                clean_disabled.append(mid)
+        s["disabled_modules"] = clean_disabled
 
         if d.get("selected_version") is not None:
             sel = str(d["selected_version"]).strip()
@@ -266,4 +285,38 @@ class StateStore:
     def last_launch(self) -> dict[str, str]:
         value = self.data.get("last_launch")
         return dict(value) if isinstance(value, dict) else {}
+
+    def module_state(self, module_id: str) -> dict[str, Any]:
+        mid = str(module_id or "").strip()
+        if not mid:
+            return {}
+        root = self.data.setdefault("module_data", {})
+        if not isinstance(root, dict):
+            root = {}
+            self.data["module_data"] = root
+        bucket = root.get(mid)
+        if not isinstance(bucket, dict):
+            bucket = {}
+            root[mid] = bucket
+        return bucket
+
+    def disabled_modules(self) -> list[str]:
+        raw = self.settings.get("disabled_modules")
+        return list(raw) if isinstance(raw, list) else []
+
+    def is_module_disabled(self, module_id: str) -> bool:
+        return str(module_id or "").strip() in self.disabled_modules()
+
+    def set_module_enabled(self, module_id: str, enabled: bool) -> None:
+        mid = str(module_id or "").strip()
+        if not mid:
+            return
+        disabled = self.disabled_modules()
+        if enabled:
+            disabled = [item for item in disabled if item != mid]
+        elif mid not in disabled:
+            disabled.append(mid)
+        self.settings["disabled_modules"] = disabled
+        self.save()
+
 
